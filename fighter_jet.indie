@@ -319,6 +319,13 @@ class Main(MainContext):
             self._tick_flash_side = -1
         self._tick_count_last_price = current_price
 
+    def _center_text_line(self, text: str, width: int) -> str:
+        padding_count = int((width - len(text)) / 2.0)
+        left_padding = ''
+        for pad_index in range(padding_count):
+            left_padding = left_padding + ' '
+        return left_padding + text
+
     def _new_mtf_frame(self, minutes: int) -> dict[str, float]:
         return {
             'minutes': minutes * 1.0,
@@ -1493,45 +1500,67 @@ class Main(MainContext):
         tick_net_text = str(tick_net)
         if tick_net > 0:
             tick_net_text = '+' + tick_net_text
+        tick_buy_count_text = str(self._tick_up_count)
+        tick_sell_count_text = str(self._tick_down_count)
+        tick_buy_caption = 'TICKS/BAR | BUY '
+        tick_sell_caption = ' | SELL '
+        tick_net_caption = ' | NET '
+        tick_line_width = (
+            len(tick_buy_caption) + len(tick_buy_count_text)
+            + len(tick_sell_caption) + len(tick_sell_count_text)
+            + len(tick_net_caption) + len(tick_net_text)
+        )
 
         tick_history_count = len(self._tick_up_history)
-        tick_average_text = (
-            'AVG20 | WARMUP ' + str(tick_history_count) + '/20'
-        )
-        if tick_history_count == 20:
-            tick_up_total = 0
-            tick_down_total = 0
-            for old_up_count in self._tick_up_history:
+        tick_sample_count = tick_history_count + 1
+        if tick_sample_count > 20:
+            tick_sample_count = 20
+        history_start_index = tick_history_count - (tick_sample_count - 1)
+        if history_start_index < 0:
+            history_start_index = 0
+        tick_up_total = self._tick_up_count
+        tick_down_total = self._tick_down_count
+        history_index = 0
+        for old_up_count in self._tick_up_history:
+            if history_index >= history_start_index:
                 tick_up_total = tick_up_total + old_up_count
-            for old_down_count in self._tick_down_history:
+            history_index = history_index + 1
+        history_index = 0
+        for old_down_count in self._tick_down_history:
+            if history_index >= history_start_index:
                 tick_down_total = tick_down_total + old_down_count
-            average_buy_ticks = tick_up_total / 20.0
-            average_sell_ticks = tick_down_total / 20.0
-            tick_average_text = (
-                'AVG20 | BUY ' + str(round(average_buy_ticks, 1))
-                + ' SELL ' + str(round(average_sell_ticks, 1))
-            )
+            history_index = history_index + 1
+        average_buy_ticks = tick_up_total / (tick_sample_count * 1.0)
+        average_sell_ticks = tick_down_total / (tick_sample_count * 1.0)
+        tick_average_text = (
+            'AVG20 ' + str(tick_sample_count) + '/20 | BUY '
+            + str(round(average_buy_ticks, 1))
+            + ' SELL ' + str(round(average_sell_ticks, 1))
+        )
 
         why_text = (
             trend_reason + ' ' + bb_reason + ' ' + rsi_reason + ' '
             + volume_reason + ' ' + candle_reason
         )
         analyst_text = (
-            'RULE SIM | NO LIVE ORDERS\n'
-            + 'STATE: ' + sim_state_text + ' | ' + signal_name + '\n'
-            + 'WHY: ' + why_text + '\n'
-            + plan_text + '\n'
-            + sim_pnl_label + '\n'
-            + size_text + '\n'
-            + 'TICKS/BAR | BUY\n'
-            + tick_average_text
+            self._center_text_line('RULE SIM | NO LIVE ORDERS', tick_line_width) + '\n'
+            + self._center_text_line(
+                'STATE: ' + sim_state_text + ' | ' + signal_name,
+                tick_line_width,
+            ) + '\n'
+            + self._center_text_line('WHY: ' + why_text, tick_line_width) + '\n'
+            + self._center_text_line(plan_text, tick_line_width) + '\n'
+            + self._center_text_line(sim_pnl_label, tick_line_width) + '\n'
+            + self._center_text_line(size_text, tick_line_width) + '\n'
+            + tick_buy_caption + '\n'
+            + self._center_text_line(tick_average_text, tick_line_width)
         )
         self._analyst_label.text = analyst_text
         # Keep captions white; only the numeric buy/sell counters flash.
-        self._tick_buy_count_label.text = str(self._tick_up_count)
-        self._tick_sell_caption_label.text = ' | SELL'
-        self._tick_sell_count_label.text = str(self._tick_down_count)
-        self._tick_net_caption_label.text = ' | NET'
+        self._tick_buy_count_label.text = tick_buy_count_text
+        self._tick_sell_caption_label.text = tick_sell_caption
+        self._tick_sell_count_label.text = tick_sell_count_text
+        self._tick_net_caption_label.text = tick_net_caption
         self._tick_net_value_label.text = tick_net_text
         buy_count_color = color.rgba(255, 255, 255, 1.0)
         sell_count_color = color.rgba(255, 255, 255, 1.0)
