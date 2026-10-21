@@ -432,10 +432,10 @@ class Main(MainContext):
         if isnan(current_time) or isnan(previous_time):
             return
         time_delta = abs(current_time - previous_time)
-        if 50.0 <= time_delta <= 70.0:
+        if time_delta >= 50.0 and time_delta <= 70.0:
             self._mtf_time_scale = 1
             self._mtf_chart_is_1m = True
-        elif 50000.0 <= time_delta <= 70000.0:
+        elif time_delta >= 50000.0 and time_delta <= 70000.0:
             self._mtf_time_scale = 1000
             self._mtf_chart_is_1m = True
         if not self._mtf_chart_is_1m:
@@ -1163,21 +1163,21 @@ class Main(MainContext):
             mtf_1h_text = '+' + mtf_1h_text
         if mtf_4h['score'] > 0:
             mtf_4h_text = '+' + mtf_4h_text
-        if not self._mtf_chart_is_1m:
-            mtf_text = 'MTF NEEDS 1M CHART'
-        elif not mtf_ready:
-            mtf_text = 'MTF WARMUP 5m/15m/1h/4h'
-        else:
-            mtf_status = 'WAIT'
-            if mtf_long_ok:
-                mtf_status = 'BUY OK'
-            elif mtf_short_ok:
-                mtf_status = 'SELL OK'
-            mtf_text = (
-                'MTF 5/15m,1h,4h ' + mtf_5m_text + '/'
-                + mtf_15m_text + '/' + mtf_1h_text + '/'
-                + mtf_4h_text + ' ' + mtf_status
-            )
+        mtf_text = 'MTF NEEDS 1M CHART'
+        if self._mtf_chart_is_1m:
+            if not mtf_ready:
+                mtf_text = 'MTF WARMUP 5m/15m/1h/4h'
+            else:
+                mtf_status = 'WAIT'
+                if mtf_long_ok:
+                    mtf_status = 'BUY OK'
+                elif mtf_short_ok:
+                    mtf_status = 'SELL OK'
+                mtf_text = (
+                    'MTF 5/15m,1h,4h ' + mtf_5m_text + '/'
+                    + mtf_15m_text + '/' + mtf_1h_text + '/'
+                    + mtf_4h_text + ' ' + mtf_status
+                )
 
         support_text = 'warming up'
         resistance_text = 'warming up'
