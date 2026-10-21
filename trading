@@ -207,7 +207,7 @@ class Main(MainContext):
             font_size=12,
         )
 
-    def _new_mtf_frame(self, minutes):
+    def _new_mtf_frame(self, minutes: param:int):
         return {
             'minutes': minutes,
             'bucket': -1,
@@ -243,8 +243,11 @@ class Main(MainContext):
             'ready': False,
         }
 
-    def _start_mtf_aggregate(self, frame, bucket, open_value, high_value,
-                             low_value, close_value, volume_value):
+    def _start_mtf_aggregate(self, frame_index: param:int, bucket: param:int,
+                             open_value: param:float, high_value: param:float,
+                             low_value: param:float, close_value: param:float,
+                             volume_value: param:float):
+        frame = self._mtf_frames[frame_index]
         frame['bucket'] = bucket
         frame['has_aggregate'] = True
         frame['finalized'] = False
@@ -255,8 +258,11 @@ class Main(MainContext):
         frame['aggregate_volume'] = volume_value
         frame['aggregate_count'] = 1
 
-    def _complete_mtf_aggregate(self, frame, trend_length, radar_length,
-                                volume_sma, band_length, rsi_length):
+    def _complete_mtf_aggregate(self, frame_index: param:int,
+                                trend_length: param:int, radar_length: param:int,
+                                volume_sma: param:int, band_length: param:int,
+                                rsi_length: param:int):
+        frame = self._mtf_frames[frame_index]
         close_value = frame['aggregate_close']
         high_value = frame['aggregate_high']
         low_value = frame['aggregate_low']
@@ -424,11 +430,13 @@ class Main(MainContext):
             and len(frame['volume_history']) >= volume_sma
         )
 
-    def _update_multi_timeframe(self, current_time, previous_time,
-                                open_value, high_value, low_value,
-                                close_value, volume_value, trend_length,
-                                radar_length, volume_sma, band_length,
-                                rsi_length):
+    def _update_multi_timeframe(self, current_time: param:float,
+                                previous_time: param:float,
+                                open_value: param:float, high_value: param:float,
+                                low_value: param:float, close_value: param:float,
+                                volume_value: param:float, trend_length: param:int,
+                                radar_length: param:int, volume_sma: param:int,
+                                band_length: param:int, rsi_length: param:int):
         if isnan(current_time) or isnan(previous_time):
             return
         time_delta = abs(current_time - previous_time)
@@ -441,22 +449,23 @@ class Main(MainContext):
         if not self._mtf_chart_is_1m:
             return
 
+        frame_index = 0
         for frame in self._mtf_frames:
             interval = frame['minutes'] * 60 * self._mtf_time_scale
             source_bucket = int(previous_time / interval)
             if not frame['has_aggregate']:
                 self._start_mtf_aggregate(
-                    frame, source_bucket, open_value, high_value,
+                    frame_index, source_bucket, open_value, high_value,
                     low_value, close_value, volume_value,
                 )
             elif source_bucket != frame['bucket']:
                 if not frame['finalized']:
                     self._complete_mtf_aggregate(
-                        frame, trend_length, radar_length, volume_sma,
+                        frame_index, trend_length, radar_length, volume_sma,
                         band_length, rsi_length,
                     )
                 self._start_mtf_aggregate(
-                    frame, source_bucket, open_value, high_value,
+                    frame_index, source_bucket, open_value, high_value,
                     low_value, close_value, volume_value,
                 )
             else:
@@ -472,10 +481,11 @@ class Main(MainContext):
             if (current_bucket != frame['bucket']
                     and not frame['finalized']):
                 self._complete_mtf_aggregate(
-                    frame, trend_length, radar_length, volume_sma,
+                    frame_index, trend_length, radar_length, volume_sma,
                     band_length, rsi_length,
                 )
                 frame['finalized'] = True
+            frame_index = frame_index + 1
 
     def calc(
         self,
