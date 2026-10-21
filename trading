@@ -207,7 +207,7 @@ class Main(MainContext):
             font_size=12,
         )
 
-    def _new_mtf_frame(self, minutes: param:int):
+    def _new_mtf_frame(self, minutes: int):
         return {
             'minutes': minutes,
             'bucket': -1,
@@ -243,10 +243,10 @@ class Main(MainContext):
             'ready': False,
         }
 
-    def _start_mtf_aggregate(self, frame_index: param:int, bucket: param:int,
-                             open_value: param:float, high_value: param:float,
-                             low_value: param:float, close_value: param:float,
-                             volume_value: param:float):
+    def _start_mtf_aggregate(self, frame_index: int, bucket: int,
+                             open_value: float, high_value: float,
+                             low_value: float, close_value: float,
+                             volume_value: float):
         frame = self._mtf_frames[frame_index]
         frame['bucket'] = bucket
         frame['has_aggregate'] = True
@@ -258,10 +258,10 @@ class Main(MainContext):
         frame['aggregate_volume'] = volume_value
         frame['aggregate_count'] = 1
 
-    def _complete_mtf_aggregate(self, frame_index: param:int,
-                                trend_length: param:int, radar_length: param:int,
-                                volume_sma: param:int, band_length: param:int,
-                                rsi_length: param:int):
+    def _complete_mtf_aggregate(self, frame_index: int,
+                                trend_length: int, radar_length: int,
+                                volume_sma: int, band_length: int,
+                                rsi_length: int):
         frame = self._mtf_frames[frame_index]
         close_value = frame['aggregate_close']
         high_value = frame['aggregate_high']
@@ -430,13 +430,13 @@ class Main(MainContext):
             and len(frame['volume_history']) >= volume_sma
         )
 
-    def _update_multi_timeframe(self, current_time: param:float,
-                                previous_time: param:float,
-                                open_value: param:float, high_value: param:float,
-                                low_value: param:float, close_value: param:float,
-                                volume_value: param:float, trend_length: param:int,
-                                radar_length: param:int, volume_sma: param:int,
-                                band_length: param:int, rsi_length: param:int):
+    def _update_multi_timeframe(self, current_time: float,
+                                previous_time: float,
+                                open_value: float, high_value: float,
+                                low_value: float, close_value: float,
+                                volume_value: float, trend_length: int,
+                                radar_length: int, volume_sma: int,
+                                band_length: int, rsi_length: int):
         if isnan(current_time) or isnan(previous_time):
             return
         time_delta = abs(current_time - previous_time)
