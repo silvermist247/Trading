@@ -88,25 +88,13 @@ from indie.drawings import (
         pane=True, status_line=False, price_label=False,
     ),
 )
-@plot.marker(
-    title='Active simulated TP target',
-    color=color.rgba(255, 165, 0, 1.0),
-    style=plot.marker_style.CIRCLE,
-    position=plot.marker_position.CENTER,
-    size=2,
-    display_options=plot.MarkerDisplayOptions(
-        pane=True, status_line=False, price_label=False,
-    ),
+@plot.line(
+    id='sim_tp_reference', title='Active simulated TP target',
+    color=color.rgba(255, 165, 0, 1.0), line_width=2,
 )
-@plot.marker(
-    title='Active simulated SL stop',
-    color=color.rgba(255, 220, 0, 1.0),
-    style=plot.marker_style.CIRCLE,
-    position=plot.marker_position.CENTER,
-    size=2,
-    display_options=plot.MarkerDisplayOptions(
-        pane=True, status_line=False, price_label=False,
-    ),
+@plot.line(
+    id='sim_sl_reference', title='Active simulated SL stop',
+    color=color.rgba(255, 220, 0, 1.0), line_width=2,
 )
 @plot.marker(
     title='Simulated take-profit fill',
@@ -266,7 +254,7 @@ class Main(MainContext):
             ),
             bg_color=color.rgba(12, 20, 31, 0.96),
             text_color=color.rgba(235, 243, 255, 1.0),
-            font_size=10,
+            font_size=12,
         )
         self._tick_buy_count_label = LabelRel(
             '',
@@ -1982,7 +1970,10 @@ class Main(MainContext):
         )
         self._analyst_label.text = analyst_text
 
-        chat_answer = market_text + ' | ' + mtf_status + ' | SCORE ' + confluence_text
+        chat_answer = (
+            market_text + ' | MTF ' + mtf_status
+            + ' | SCORE ' + confluence_text + ' | RSI ' + rsi_display
+        )
         if chart_chat_question == 'Why holding?':
             if self._sim_side > 0:
                 chat_answer = 'Hold LONG'
@@ -2087,6 +2078,49 @@ class Main(MainContext):
         elif long_mtf_blocked or short_mtf_blocked:
             chat_action_text = 'WAIT: MTF alignment'
 
+        chat_plot_text = 'TRADE PLOTS: NONE (NO SIM FILL)'
+        if self._sim_side > 0:
+            chat_plot_text = (
+                'TRADE PLOTS: SL ' + str(round(self._sim_stop, price_precision))
+                + ' | TP ' + str(round(self._sim_target, price_precision))
+            )
+        elif self._sim_side < 0:
+            chat_plot_text = (
+                'TRADE PLOTS: SL ' + str(round(self._sim_stop, price_precision))
+                + ' | TP ' + str(round(self._sim_target, price_precision))
+            )
+        elif self._pending_side > 0:
+            chat_plot_text = (
+                'TRADE PLAN: BUY SL ' + str(round(self._pending_stop, price_precision))
+                + ' | TP ' + str(round(self._pending_target, price_precision))
+            )
+        elif self._pending_side < 0:
+            chat_plot_text = (
+                'TRADE PLAN: SELL SL ' + str(round(self._pending_stop, price_precision))
+                + ' | TP ' + str(round(self._pending_target, price_precision))
+            )
+        elif self._sim_exit_event_bar == self.bar_index:
+            if self._sim_exit_event_type == 1:
+                chat_plot_text = (
+                    'TRADE EXIT: TP HIT @ '
+                    + str(round(self._sim_exit_event_price, price_precision))
+                )
+            elif self._sim_exit_event_type == -1:
+                chat_plot_text = (
+                    'TRADE EXIT: SL HIT @ '
+                    + str(round(self._sim_exit_event_price, price_precision))
+                )
+            elif self._sim_exit_event_type == -2:
+                chat_plot_text = (
+                    'TRADE EXIT: DD LOCK @ '
+                    + str(round(self._sim_exit_event_price, price_precision))
+                )
+            elif self._sim_exit_event_type == 2:
+                chat_plot_text = (
+                    'TRADE EXIT: REV @ '
+                    + str(round(self._sim_exit_event_price, price_precision))
+                )
+
         chat_risk_text = 'RISK: EQ UNSET | 1 UNIT'
         if equity_configured:
             chat_risk_text = (
@@ -2112,9 +2146,10 @@ class Main(MainContext):
             + 'READ: ' + chat_answer + '\n'
             + 'ACTION: ' + chat_action_text + '\n'
             + 'POS: ' + sim_state_text + ' | ' + chat_mode_text + '\n'
+            + chat_plot_text + '\n'
             + chat_policy_text + '\n'
             + chat_risk_text + '\n'
-            + 'NO LIVE ORDERS'
+            + 'SIM ONLY | NO LIVE ORDERS'
         )
         self._chat_label.text_color = color.rgba(235, 243, 255, 1.0)
 
