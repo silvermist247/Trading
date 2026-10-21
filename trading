@@ -125,6 +125,10 @@ class Main(MainContext):
         self._tick_up_count = 0
         self._tick_down_count = 0
         self._tick_flash_side = 0
+        self._tick_up_history = [0]
+        self._tick_down_history = [0]
+        self._tick_up_history.pop(0)
+        self._tick_down_history.pop(0)
         self._sim_bar_index = -1
         self._mtf_time_scale = 0
         self._mtf_chart_is_1m = False
@@ -222,7 +226,7 @@ class Main(MainContext):
             RelativePosition(
                 vertical_anchor=va.BOTTOM,
                 horizontal_anchor=ha.LEFT,
-                top_bottom_ratio=0.87,
+                top_bottom_ratio=0.89,
                 left_right_ratio=0.68,
             ),
             bg_color=color.rgba(16, 28, 38, 0.92),
@@ -234,7 +238,7 @@ class Main(MainContext):
             RelativePosition(
                 vertical_anchor=va.BOTTOM,
                 horizontal_anchor=ha.LEFT,
-                top_bottom_ratio=0.87,
+                top_bottom_ratio=0.89,
                 left_right_ratio=0.74,
             ),
             bg_color=color.rgba(16, 28, 38, 0.92),
@@ -246,7 +250,7 @@ class Main(MainContext):
             RelativePosition(
                 vertical_anchor=va.BOTTOM,
                 horizontal_anchor=ha.LEFT,
-                top_bottom_ratio=0.87,
+                top_bottom_ratio=0.89,
                 left_right_ratio=0.81,
             ),
             bg_color=color.rgba(16, 28, 38, 0.92),
@@ -258,7 +262,7 @@ class Main(MainContext):
             RelativePosition(
                 vertical_anchor=va.BOTTOM,
                 horizontal_anchor=ha.LEFT,
-                top_bottom_ratio=0.87,
+                top_bottom_ratio=0.89,
                 left_right_ratio=0.87,
             ),
             bg_color=color.rgba(16, 28, 38, 0.92),
@@ -270,7 +274,7 @@ class Main(MainContext):
             RelativePosition(
                 vertical_anchor=va.BOTTOM,
                 horizontal_anchor=ha.LEFT,
-                top_bottom_ratio=0.87,
+                top_bottom_ratio=0.89,
                 left_right_ratio=0.93,
             ),
             bg_color=color.rgba(16, 28, 38, 0.92),
@@ -284,6 +288,21 @@ class Main(MainContext):
         if isnan(current_price):
             return
         if self._tick_count_bar_index != self.bar_index:
+            if self._tick_count_bar_index >= 0:
+                if self.bar_index == self._tick_count_bar_index + 1:
+                    # Store only completed candles; averages ignore the live candle.
+                    self._tick_up_history.append(self._tick_up_count)
+                    self._tick_down_history.append(self._tick_down_count)
+                    if len(self._tick_up_history) > 20:
+                        self._tick_up_history.pop(0)
+                    if len(self._tick_down_history) > 20:
+                        self._tick_down_history.pop(0)
+                else:
+                    # Clear stale history if replay or a chart jump breaks bar sequence.
+                    self._tick_up_history = [0]
+                    self._tick_down_history = [0]
+                    self._tick_up_history.pop(0)
+                    self._tick_down_history.pop(0)
             self._tick_count_bar_index = self.bar_index
             self._tick_count_last_price = current_price
             self._tick_up_count = 0
@@ -1475,6 +1494,24 @@ class Main(MainContext):
         if tick_net > 0:
             tick_net_text = '+' + tick_net_text
 
+        tick_history_count = len(self._tick_up_history)
+        tick_average_text = (
+            'AVG20 | WARMUP ' + str(tick_history_count) + '/20'
+        )
+        if tick_history_count == 20:
+            tick_up_total = 0
+            tick_down_total = 0
+            for old_up_count in self._tick_up_history:
+                tick_up_total = tick_up_total + old_up_count
+            for old_down_count in self._tick_down_history:
+                tick_down_total = tick_down_total + old_down_count
+            average_buy_ticks = tick_up_total / 20.0
+            average_sell_ticks = tick_down_total / 20.0
+            tick_average_text = (
+                'AVG20 | BUY ' + str(round(average_buy_ticks, 1))
+                + ' SELL ' + str(round(average_sell_ticks, 1))
+            )
+
         why_text = (
             trend_reason + ' ' + bb_reason + ' ' + rsi_reason + ' '
             + volume_reason + ' ' + candle_reason
@@ -1486,7 +1523,8 @@ class Main(MainContext):
             + plan_text + '\n'
             + sim_pnl_label + '\n'
             + size_text + '\n'
-            + 'TICKS/BAR | BUY'
+            + 'TICKS/BAR | BUY\n'
+            + tick_average_text
         )
         self._analyst_label.text = analyst_text
         # Keep captions white; only the numeric buy/sell counters flash.
