@@ -134,6 +134,12 @@ class Main(MainContext):
             self._new_mtf_frame(60),
             self._new_mtf_frame(240),
         ]
+        self._mtf_close_histories = [[0.0], [0.0], [0.0], [0.0]]
+        self._mtf_volume_histories = [[0.0], [0.0], [0.0], [0.0]]
+        for history in self._mtf_close_histories:
+            history.pop(0)
+        for history in self._mtf_volume_histories:
+            history.pop(0)
         self._pending_side = 0
         self._pending_stop = nan
         self._pending_target = nan
@@ -207,40 +213,38 @@ class Main(MainContext):
             font_size=12,
         )
 
-    def _new_mtf_frame(self, minutes: int) -> dict[str, object]:
+    def _new_mtf_frame(self, minutes: int) -> dict[str, float]:
         return {
-            'minutes': minutes,
-            'bucket': -1,
-            'has_aggregate': False,
-            'finalized': False,
+            'minutes': minutes * 1.0,
+            'bucket': -1.0,
+            'has_aggregate': 0.0,
+            'finalized': 0.0,
             'aggregate_open': nan,
             'aggregate_high': nan,
             'aggregate_low': nan,
             'aggregate_close': nan,
             'aggregate_volume': 0.0,
-            'aggregate_count': 0,
-            'closed_count': 0,
+            'aggregate_count': 0.0,
+            'closed_count': 0.0,
             'fast_seed_sum': 0.0,
             'slow_seed_sum': 0.0,
             'fast_ema': nan,
             'slow_ema': nan,
             'atr_seed_sum': 0.0,
-            'atr_count': 0,
+            'atr_count': 0.0,
             'atr_value': nan,
             'previous_close': nan,
             'rsi_gain_sum': 0.0,
             'rsi_loss_sum': 0.0,
-            'rsi_count': 0,
+            'rsi_count': 0.0,
             'average_gain': nan,
             'average_loss': nan,
             'rsi_value': nan,
-            'close_history': [],
-            'volume_history': [],
             'bb_middle': nan,
-            'volume_ok': False,
-            'trend': 0,
-            'score': 0,
-            'ready': False,
+            'volume_ok': 0.0,
+            'trend': 0.0,
+            'score': 0.0,
+            'ready': 0.0,
         }
 
     def _start_mtf_aggregate(self, frame_index: int, bucket: int,
@@ -248,15 +252,15 @@ class Main(MainContext):
                              low_value: float, close_value: float,
                              volume_value: float) -> None:
         frame = self._mtf_frames[frame_index]
-        frame['bucket'] = bucket
-        frame['has_aggregate'] = True
-        frame['finalized'] = False
+        frame['bucket'] = bucket * 1.0
+        frame['has_aggregate'] = 1.0
+        frame['finalized'] = 0.0
         frame['aggregate_open'] = open_value
         frame['aggregate_high'] = high_value
         frame['aggregate_low'] = low_value
         frame['aggregate_close'] = close_value
         frame['aggregate_volume'] = volume_value
-        frame['aggregate_count'] = 1
+        frame['aggregate_count'] = 1.0
 
     def _complete_mtf_aggregate(self, frame_index: int,
                                 trend_length: int, radar_length: int,
@@ -268,7 +272,7 @@ class Main(MainContext):
         low_value = frame['aggregate_low']
         volume_value = frame['aggregate_volume']
         previous_close = frame['previous_close']
-        completed_count = frame['closed_count'] + 1
+        completed_count = frame['closed_count'] + 1.0
         slow_length = trend_length * 2
 
         if completed_count <= trend_length:
@@ -302,7 +306,7 @@ class Main(MainContext):
             if low_gap > true_range:
                 true_range = low_gap
 
-        atr_count = frame['atr_count'] + 1
+        atr_count = frame['atr_count'] + 1.0
         if atr_count <= radar_length:
             frame['atr_seed_sum'] = frame['atr_seed_sum'] + true_range
             if atr_count == radar_length:
@@ -325,7 +329,7 @@ class Main(MainContext):
             if frame['rsi_count'] < rsi_length:
                 frame['rsi_gain_sum'] = frame['rsi_gain_sum'] + gain
                 frame['rsi_loss_sum'] = frame['rsi_loss_sum'] + loss
-                frame['rsi_count'] = frame['rsi_count'] + 1
+                frame['rsi_count'] = frame['rsi_count'] + 1.0
                 if frame['rsi_count'] == rsi_length:
                     frame['average_gain'] = frame['rsi_gain_sum'] / rsi_length
                     frame['average_loss'] = frame['rsi_loss_sum'] / rsi_length
@@ -344,26 +348,28 @@ class Main(MainContext):
                     relative_strength = frame['average_gain'] / frame['average_loss']
                     frame['rsi_value'] = 100.0 - 100.0 / (1.0 + relative_strength)
 
+        volume_history = self._mtf_volume_histories[frame_index]
         volume_average = nan
-        if len(frame['volume_history']) >= volume_sma:
+        if len(volume_history) >= volume_sma:
             volume_total = 0.0
-            for old_volume in frame['volume_history']:
+            for old_volume in volume_history:
                 volume_total = volume_total + old_volume
             volume_average = volume_total / volume_sma
-        frame['volume_ok'] = (
-            not isnan(volume_average) and volume_value > volume_average
-        )
-        frame['volume_history'].append(volume_value)
-        if len(frame['volume_history']) > volume_sma:
-            frame['volume_history'].pop(0)
+        frame['volume_ok'] = 0.0
+        if not isnan(volume_average) and volume_value > volume_average:
+            frame['volume_ok'] = 1.0
+        volume_history.append(volume_value)
+        if len(volume_history) > volume_sma:
+            volume_history.pop(0)
 
-        frame['close_history'].append(close_value)
-        if len(frame['close_history']) > band_length:
-            frame['close_history'].pop(0)
+        close_history = self._mtf_close_histories[frame_index]
+        close_history.append(close_value)
+        if len(close_history) > band_length:
+            close_history.pop(0)
         frame['bb_middle'] = nan
-        if len(frame['close_history']) == band_length:
+        if len(close_history) == band_length:
             close_total = 0.0
-            for old_close in frame['close_history']:
+            for old_close in close_history:
                 close_total = close_total + old_close
             frame['bb_middle'] = close_total / band_length
 
@@ -418,17 +424,17 @@ class Main(MainContext):
 
         frame['closed_count'] = completed_count
         frame['previous_close'] = close_value
-        frame['trend'] = trend
-        frame['score'] = score
-        frame['ready'] = (
-            completed_count >= warmup_count
-            and not isnan(frame['fast_ema'])
-            and not isnan(frame['slow_ema'])
-            and not isnan(frame['atr_value'])
-            and not isnan(frame['rsi_value'])
-            and not isnan(frame['bb_middle'])
-            and len(frame['volume_history']) >= volume_sma
-        )
+        frame['trend'] = trend * 1.0
+        frame['score'] = score * 1.0
+        frame['ready'] = 0.0
+        if (completed_count >= warmup_count
+                and not isnan(frame['fast_ema'])
+                and not isnan(frame['slow_ema'])
+                and not isnan(frame['atr_value'])
+                and not isnan(frame['rsi_value'])
+                and not isnan(frame['bb_middle'])
+                and len(volume_history) >= volume_sma):
+            frame['ready'] = 1.0
 
     def _update_multi_timeframe(self, current_time: float,
                                 previous_time: float,
@@ -475,7 +481,7 @@ class Main(MainContext):
                     frame['aggregate_low'] = low_value
                 frame['aggregate_close'] = close_value
                 frame['aggregate_volume'] = frame['aggregate_volume'] + volume_value
-                frame['aggregate_count'] = frame['aggregate_count'] + 1
+                frame['aggregate_count'] = frame['aggregate_count'] + 1.0
 
             current_bucket = int(current_time / interval)
             if (current_bucket != frame['bucket']
@@ -484,7 +490,7 @@ class Main(MainContext):
                     frame_index, trend_length, radar_length, volume_sma,
                     band_length, rsi_length,
                 )
-                frame['finalized'] = True
+                frame['finalized'] = 1.0
             frame_index = frame_index + 1
 
     def calc(
@@ -526,6 +532,12 @@ class Main(MainContext):
                 self._new_mtf_frame(60),
                 self._new_mtf_frame(240),
             ]
+            self._mtf_close_histories = [[0.0], [0.0], [0.0], [0.0]]
+            self._mtf_volume_histories = [[0.0], [0.0], [0.0], [0.0]]
+            for history in self._mtf_close_histories:
+                history.pop(0)
+            for history in self._mtf_volume_histories:
+                history.pop(0)
         if new_sim_bar and len(self.close) >= 2:
             self._update_multi_timeframe(
                 self.time[0], self.time[1],
@@ -1161,10 +1173,10 @@ class Main(MainContext):
         if confluence > 0:
             confluence_text = '+' + confluence_text
 
-        mtf_5m_text = str(mtf_5m['score'])
-        mtf_15m_text = str(mtf_15m['score'])
-        mtf_1h_text = str(mtf_1h['score'])
-        mtf_4h_text = str(mtf_4h['score'])
+        mtf_5m_text = str(int(mtf_5m['score']))
+        mtf_15m_text = str(int(mtf_15m['score']))
+        mtf_1h_text = str(int(mtf_1h['score']))
+        mtf_4h_text = str(int(mtf_4h['score']))
         if mtf_5m['score'] > 0:
             mtf_5m_text = '+' + mtf_5m_text
         if mtf_15m['score'] > 0:
