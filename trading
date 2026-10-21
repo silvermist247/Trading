@@ -1,0 +1,6 @@
+# indie:lang_version = 5
+from indie import indicator
+
+@indicator('New indicator', overlay_main_pane=True)
+def Main(self):
+    return self.close[0]
