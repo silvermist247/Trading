@@ -12,15 +12,17 @@ from indie.drawings import (
 )
 
 
-# Rule-based OHLCV paper simulator; it is not a learning model or order system.
-# Run on a 1-minute chart: closed 1m candles are aggregated into 5m, 15m, 1h, and 4h bars.
+# Rule-based OHLCV paper simulator with a small in-memory contextual outcome selector;
+# it is not an AI service, durable learner, broker integration, or order system.
+# Run on a 1-minute chart: completed 1m candles are aggregated into 5m, 15m, 1h, and 4h bars.
 # Other chart intervals show an MTF warning and block new entries; default warmup is about 84 hours.
-# MTF scores use only completed higher-timeframe bars to avoid using unfinished candles.
+# MTF scores use only completed higher-timeframe bars; 1m conditions can change intrabar.
 # Higher-timeframe volume is the chart's volume field (possibly tick volume), not trader counts.
-# Signals are queued at candle close and simulated at the next candle open. Stop/TP hits
-# use candle ranges; if both are touched in one bar, the simulator assumes the stop hit first.
-# Equity is optional: without it, trades use one simulated unit. No live orders are placed.
-# Costs are estimates; actual fees, slippage, funding, contract units, and liquidation differ.
+# Pending signals are rechecked at the next 1m open. Stop/TP hits use candle ranges; if both
+# are touched in one bar, the simulator assumes the stop hit first. Exits/policy rewards reset
+# when the indicator runtime is reinitialized; they are not exported or stored durably.
+# Equity is optional: without it, trades use one simulated unit and percent risk/drawdown caps
+# cannot be calculated. No live orders are placed. Costs are estimates; actual execution differs.
 @indicator('Fighter-Jet Radar - Paper Trade Simulator', overlay_main_pane=True)
 @param.int('trend_length', default=9, min=1, max=250, title='Trend EMA base length')
 @param.int('radar_length', default=14, min=1, max=250, title='ATR length')
@@ -38,6 +40,16 @@ from indie.drawings import (
 @param.float('risk_per_trade_pct', default=0.25, min=0.05, max=1.0, step=0.05, title='Risk budget (% of equity)')
 @param.float('round_trip_cost_pct', default=0.0, min=0.0, max=2.0, step=0.05, title='Estimated round-trip costs (% notional; set broker estimate)')
 @param.float('account_equity_quote', default=0.0, min=0.0, max=1000000000.0, step=1.0, title='Optional equity in chart quote currency (0 simulates 1 unit)')
+@param.bool('continuous_exposure', default=True, title='Continuous simulated long/short exposure')
+@param.int('reverse_confirm_bars', default=2, min=1, max=5, title='Opposite-regime confirmation (closed 1m bars)')
+@param.int('stop_cooldown_bars', default=1, min=1, max=20, title='Cooldown after TP/SL (1m bars)')
+@param.float('max_drawdown_pct', default=5.0, min=1.0, max=50.0, step=0.5, title='Hard cap: realized drawdown from peak (%)')
+@param.string(
+    'chart_chat_question',
+    default='Market read',
+    options=['Market read', 'Why holding?', 'Risk / levels', 'Why waiting?'],
+    title='Top-right chart chat prompt (select in settings)',
+)
 @plot.line(
     id='ema_up', title='EMA uptrend',
     color=color.rgba(0, 255, 0, 1.0), line_width=2,
@@ -172,7 +184,30 @@ class Main(MainContext):
         self._sim_trade_count = 0
         self._sim_tp_count = 0
         self._sim_stop_count = 0
+        self._sim_reversal_count = 0
         self._sim_realized_pnl = 0.0
+        self._sim_peak_equity = nan
+        self._sim_drawdown_pct = 0.0
+        self._sim_risk_locked = False
+        self._sim_cooldown_until_bar = -1
+        self._sim_reverse_confirm_count = 0
+        self._sim_reverse_candidate_side = 0
+        self._pending_policy_index = 1
+        self._pending_regime_index = 0
+        self._sim_policy_index = 1
+        self._sim_regime_index = 0
+        self._sim_initial_risk_per_unit = nan
+        self._sim_entry_cost_pct = 0.0
+        self._sim_policy_reward_sums = [
+            0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0,
+        ]
+        self._sim_policy_counts = [
+            0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0,
+        ]
+        self._sim_policy_attempts = [0, 0, 0]
+        self._sim_policy_last_bar = [-1, -1, -1]
+        self._sim_last_net_r = nan
+        self._sim_last_reward = nan
         self._status_label = LabelRel(
             '',
             RelativePosition(
@@ -220,6 +255,18 @@ class Main(MainContext):
             bg_color=color.rgba(16, 28, 38, 0.92),
             text_color=color.rgba(255, 255, 255, 1.0),
             font_size=12,
+        )
+        self._chat_label = LabelRel(
+            '',
+            RelativePosition(
+                vertical_anchor=va.TOP,
+                horizontal_anchor=ha.RIGHT,
+                top_bottom_ratio=0.02,
+                left_right_ratio=0.98,
+            ),
+            bg_color=color.rgba(12, 20, 31, 0.96),
+            text_color=color.rgba(235, 243, 255, 1.0),
+            font_size=11,
         )
         self._tick_buy_count_label = LabelRel(
             '',
@@ -318,6 +365,148 @@ class Main(MainContext):
             self._tick_down_count = self._tick_down_count + 1
             self._tick_flash_side = -1
         self._tick_count_last_price = current_price
+
+    def _record_policy_reward(self, regime_index: int, policy_index: int,
+                              reward: float) -> None:
+        if regime_index < 0 or regime_index > 2:
+            return
+        if policy_index < 0 or policy_index > 2:
+            return
+        policy_slot = regime_index * 3 + policy_index
+        self._sim_policy_reward_sums[policy_slot] = (
+            self._sim_policy_reward_sums[policy_slot] + reward
+        )
+        self._sim_policy_counts[policy_slot] = (
+            self._sim_policy_counts[policy_slot] + 1.0
+        )
+
+    def _select_exit_policy(self, regime_index: int) -> int:
+        if regime_index < 0 or regime_index > 2:
+            return 1
+        first_slot = regime_index * 3
+        conservative_count = self._sim_policy_counts[first_slot]
+        baseline_count = self._sim_policy_counts[first_slot + 1]
+        trend_count = self._sim_policy_counts[first_slot + 2]
+        least_count = conservative_count
+        selected_policy = 0
+        if baseline_count < least_count:
+            least_count = baseline_count
+            selected_policy = 1
+        if trend_count < least_count:
+            least_count = trend_count
+            selected_policy = 2
+        # Rotate the bounded templates once per chart bar during warm-up. Rotating
+        # by bars (not fills) prevents a rejected plan from trapping one policy forever.
+        # After five outcomes per template, choose challengers only if they beat the
+        # baseline by 0.10 net R.
+        if least_count < 5.0:
+            if self._sim_policy_last_bar[regime_index] != self.bar_index:
+                self._sim_policy_last_bar[regime_index] = self.bar_index
+                self._sim_policy_attempts[regime_index] = (
+                    self._sim_policy_attempts[regime_index] + 1
+                )
+            exploration_turn = self._sim_policy_attempts[regime_index] - 1
+            return exploration_turn % 3
+        # A zero-reward prior with five pseudo-observations shrinks small samples.
+        baseline_mean = (
+            self._sim_policy_reward_sums[first_slot + 1] / (baseline_count + 5.0)
+        )
+        best_mean = baseline_mean
+        selected_policy = 1
+        conservative_mean = (
+            self._sim_policy_reward_sums[first_slot] / (conservative_count + 5.0)
+        )
+        if conservative_mean > best_mean + 0.10:
+            best_mean = conservative_mean
+            selected_policy = 0
+        trend_mean = (
+            self._sim_policy_reward_sums[first_slot + 2] / (trend_count + 5.0)
+        )
+        if trend_mean > best_mean + 0.10:
+            selected_policy = 2
+        return selected_policy
+
+    def _update_drawdown_state(self, account_equity_quote: float,
+                               max_drawdown_pct: float) -> None:
+        if account_equity_quote <= 0.0:
+            return
+        current_equity = account_equity_quote + self._sim_realized_pnl
+        if isnan(self._sim_peak_equity) or self._sim_peak_equity <= 0.0:
+            self._sim_peak_equity = account_equity_quote
+        if current_equity > self._sim_peak_equity:
+            self._sim_peak_equity = current_equity
+        if self._sim_peak_equity > 0.0:
+            drawdown_amount = self._sim_peak_equity - current_equity
+            if drawdown_amount < 0.0:
+                drawdown_amount = 0.0
+            self._sim_drawdown_pct = (
+                drawdown_amount / self._sim_peak_equity * 100.0
+            )
+            if self._sim_drawdown_pct >= max_drawdown_pct:
+                self._sim_risk_locked = True
+
+    def _settle_sim_trade(self, exit_price: float, exit_type: int,
+                          account_equity_quote: float,
+                          max_drawdown_pct: float) -> None:
+        prior_drawdown_pct = self._sim_drawdown_pct
+        trade_move = (exit_price - self._sim_entry_price) * self._sim_side
+        trade_cost = self._sim_entry_price * self._sim_entry_cost_pct / 100.0
+        net_move = trade_move - trade_cost
+        trade_pnl = net_move * self._sim_units
+        self._sim_realized_pnl = self._sim_realized_pnl + trade_pnl
+        self._update_drawdown_state(account_equity_quote, max_drawdown_pct)
+        drawdown_increase = self._sim_drawdown_pct - prior_drawdown_pct
+        if drawdown_increase < 0.0:
+            drawdown_increase = 0.0
+        if (not isnan(self._sim_initial_risk_per_unit)
+                and self._sim_initial_risk_per_unit > 0.0):
+            self._sim_last_net_r = net_move / self._sim_initial_risk_per_unit
+            self._sim_last_reward = self._sim_last_net_r
+            if exit_type == 2:
+                self._sim_last_reward = self._sim_last_reward - 0.05
+            self._sim_last_reward = (
+                self._sim_last_reward - drawdown_increase * 0.10
+            )
+            self._record_policy_reward(
+                self._sim_regime_index,
+                self._sim_policy_index,
+                self._sim_last_reward,
+            )
+
+        self._sim_exit_event_bar = self.bar_index
+        self._sim_exit_event_type = exit_type
+        self._sim_exit_event_price = exit_price
+        if exit_type == 1:
+            self._sim_tp_count = self._sim_tp_count + 1
+        elif exit_type == -1:
+            self._sim_stop_count = self._sim_stop_count + 1
+        elif exit_type == 2:
+            self._sim_reversal_count = self._sim_reversal_count + 1
+
+        if not isnan(self._sim_entry_time) and not isnan(self.time[0]):
+            exit_line_color = color.rgba(0, 255, 0, 1.0)
+            if exit_type == -1:
+                exit_line_color = color.rgba(255, 0, 180, 1.0)
+            elif exit_type == 2:
+                exit_line_color = color.rgba(255, 165, 0, 1.0)
+            elif exit_type == -2:
+                exit_line_color = color.rgba(255, 220, 0, 1.0)
+            self.chart.draw(
+                LineSegment(
+                    AbsolutePosition(self._sim_entry_time, self._sim_entry_price),
+                    AbsolutePosition(self.time[0], exit_price),
+                    color=exit_line_color,
+                    line_width=2,
+                )
+            )
+
+        self._sim_side = 0
+        self._sim_entry_price = nan
+        self._sim_entry_time = nan
+        self._sim_stop = nan
+        self._sim_target = nan
+        self._sim_units = 0.0
+        self._sim_initial_risk_per_unit = nan
 
     def _center_text_line(self, text: str, width: int) -> str:
         padding_count = int((width - len(text)) / 2.0)
@@ -624,8 +813,14 @@ class Main(MainContext):
         risk_per_trade_pct,
         round_trip_cost_pct,
         account_equity_quote,
+        continuous_exposure,
+        reverse_confirm_bars,
+        stop_cooldown_bars,
+        max_drawdown_pct,
+        chart_chat_question,
     ):
         current_price = self.close[0]
+        self._update_drawdown_state(account_equity_quote, max_drawdown_pct)
         new_sim_bar = self.bar_index != self._sim_bar_index
         if (self._mtf_trend_length != trend_length
                 or self._mtf_radar_length != radar_length
@@ -678,8 +873,19 @@ class Main(MainContext):
         ema_up = fast_ema[0] > slow_ema[0]
 
         atr_value = nan
+        atr_previous = nan
+        atr_slow_value = nan
         if len(self.close) >= radar_length:
-            atr_value = Atr.new(radar_length)[0]
+            atr_series = Atr.new(radar_length)
+            atr_value = atr_series[0]
+            if len(self.close) >= radar_length + 1:
+                atr_previous = atr_series[1]
+        if len(self.close) >= radar_length * 3:
+            atr_slow_value = Atr.new(radar_length * 3)[0]
+        high_volatility = False
+        if (atr_value > 0 and atr_slow_value > 0
+                and atr_value >= atr_slow_value * 1.25):
+            high_volatility = True
 
         volume_ready = False
         volume_ok = False
@@ -796,6 +1002,28 @@ class Main(MainContext):
                 confluence = confluence + 1
             else:
                 confluence = confluence - 1
+
+        regime_index = 0
+        if market_trending:
+            regime_index = 1
+        if high_volatility:
+            regime_index = 2
+        selected_policy_index = self._select_exit_policy(regime_index)
+        selected_policy_name = 'BASE'
+        target_scale = 1.0
+        effective_stop_buffer_atr = stop_buffer_atr
+        if selected_policy_index == 0:
+            selected_policy_name = 'SAFE'
+            target_scale = 0.8
+            effective_stop_buffer_atr = stop_buffer_atr * 0.9
+        elif selected_policy_index == 2:
+            selected_policy_name = 'TRAIL'
+            target_scale = 1.2
+        if high_volatility:
+            target_scale = target_scale * 0.9
+        effective_tp_multiple = tp_atr_multiple * target_scale
+        if effective_tp_multiple > 4.0:
+            effective_tp_multiple = 4.0
 
         near_support = False
         near_resistance = False
@@ -940,22 +1168,30 @@ class Main(MainContext):
         short_reward_risk = nan
         long_risk_ok = False
         short_risk_ok = False
-        risk_ready = account_equity_quote > 0.0 and risk_per_trade_pct > 0.0
+        equity_configured = account_equity_quote > 0.0
+        risk_ready = (
+            equity_configured and risk_per_trade_pct > 0.0
+            and not self._sim_risk_locked
+        )
         risk_budget_quote = nan
         if risk_ready:
-            risk_budget_quote = account_equity_quote * risk_per_trade_pct / 100.0
+            current_equity = account_equity_quote + self._sim_realized_pnl
+            if current_equity > 0.0:
+                risk_budget_quote = current_equity * risk_per_trade_pct / 100.0
+            else:
+                risk_ready = False
 
         if atr_value > 0:
-            long_target_value = current_price + atr_value * tp_atr_multiple
+            long_target_value = current_price + atr_value * effective_tp_multiple
             if (not isnan(prior_resistance)
                     and prior_resistance > current_price + atr_value * 0.5
-                    and prior_resistance <= current_price + atr_value * tp_atr_multiple * 2.0):
+                    and prior_resistance <= current_price + atr_value * effective_tp_multiple * 2.0):
                 long_target_value = prior_resistance - atr_value * 0.1
 
-            short_target_value = current_price - atr_value * tp_atr_multiple
+            short_target_value = current_price - atr_value * effective_tp_multiple
             if (not isnan(prior_support)
                     and prior_support < current_price - atr_value * 0.5
-                    and prior_support >= current_price - atr_value * tp_atr_multiple * 2.0):
+                    and prior_support >= current_price - atr_value * effective_tp_multiple * 2.0):
                 short_target_value = prior_support + atr_value * 0.1
 
             long_stop_anchor = nan
@@ -972,7 +1208,7 @@ class Main(MainContext):
             elif not isnan(support):
                 long_stop_anchor = support
             if not isnan(long_stop_anchor):
-                long_stop_value = long_stop_anchor - atr_value * stop_buffer_atr
+                long_stop_value = long_stop_anchor - atr_value * effective_stop_buffer_atr
 
             short_stop_anchor = nan
             if short_breakdown_retest and not isnan(support_two_bars_ago):
@@ -988,7 +1224,7 @@ class Main(MainContext):
             elif not isnan(resistance):
                 short_stop_anchor = resistance
             if not isnan(short_stop_anchor):
-                short_stop_value = short_stop_anchor + atr_value * stop_buffer_atr
+                short_stop_value = short_stop_anchor + atr_value * effective_stop_buffer_atr
 
             if (long_stop_value < current_price
                     and long_target_value > current_price):
@@ -1043,6 +1279,30 @@ class Main(MainContext):
             long_candidate = False
             short_candidate = False
 
+        reverse_threshold = minimum_entry_score + 1
+        if reverse_threshold > 5:
+            reverse_threshold = 5
+        long_regime_ready = (
+            mtf_long_ok and market_trending and ema_up
+            and confluence >= minimum_entry_score
+            and long_risk_ok and long_room_ok
+        )
+        short_regime_ready = (
+            mtf_short_ok and market_trending and not ema_up
+            and confluence <= -minimum_entry_score
+            and short_risk_ok and short_room_ok
+        )
+        long_reverse_candidate = (
+            mtf_long_ok and market_trending and ema_up
+            and confluence >= reverse_threshold
+            and long_risk_ok and long_room_ok
+        )
+        short_reverse_candidate = (
+            mtf_short_ok and market_trending and not ema_up
+            and confluence <= -reverse_threshold
+            and short_risk_ok and short_room_ok
+        )
+
         buy_entry_marker = nan
         sell_entry_marker = nan
         tp_reference_marker = nan
@@ -1067,65 +1327,171 @@ class Main(MainContext):
             pending_stop = self._pending_stop
             pending_target = self._pending_target
             pending_max_stop_distance = self._pending_max_stop_distance
+            pending_policy_index = self._pending_policy_index
+            pending_regime_index = self._pending_regime_index
             self._pending_side = 0
             self._pending_stop = nan
             self._pending_target = nan
             self._pending_max_stop_distance = nan
+            self._pending_policy_index = 1
+            self._pending_regime_index = 0
 
-            # Never stack positions. Recheck MTF alignment at the next open in case
-            # a higher-timeframe candle completed after the 1m signal was queued.
-            # Skip entries that gap through their stop or target.
-            if self._sim_side == 0 and pending_side != 0:
-                entry_price = self.open[0]
-                entry_geometry_ok = False
-                entry_mtf_ok = False
-                if pending_side > 0 and mtf_long_ok:
-                    entry_mtf_ok = True
-                elif pending_side < 0 and mtf_short_ok:
-                    entry_mtf_ok = True
-                entry_stop_distance = nan
-                entry_reward_distance = nan
-                if pending_side > 0:
-                    if entry_price > pending_stop and entry_price < pending_target:
-                        entry_geometry_ok = True
-                        entry_stop_distance = entry_price - pending_stop
-                        entry_reward_distance = pending_target - entry_price
-                elif pending_side < 0:
-                    if entry_price < pending_stop and entry_price > pending_target:
-                        entry_geometry_ok = True
-                        entry_stop_distance = pending_stop - entry_price
-                        entry_reward_distance = entry_price - pending_target
-
-                if (entry_geometry_ok and entry_mtf_ok
-                        and not isnan(pending_max_stop_distance)
-                        and entry_stop_distance > 0):
-                    entry_cost_per_unit = entry_price * round_trip_cost_pct / 100.0
-                    entry_risk_per_unit = entry_stop_distance + entry_cost_per_unit
-                    entry_net_reward = entry_reward_distance - entry_cost_per_unit
-                    entry_reward_risk = nan
-                    if entry_risk_per_unit > 0:
-                        entry_reward_risk = entry_net_reward / entry_risk_per_unit
-                    if (entry_stop_distance <= pending_max_stop_distance
-                            and entry_net_reward > 0
-                            and entry_reward_risk >= min_reward_risk):
-                        sim_units = 1.0
-                        if risk_ready:
-                            sim_units = risk_budget_quote / entry_risk_per_unit
-                        if sim_units > 0:
-                            self._sim_side = pending_side
-                            self._sim_entry_price = entry_price
-                            self._sim_entry_time = self.time[0]
-                            self._sim_stop = pending_stop
-                            self._sim_target = pending_target
-                            self._sim_units = sim_units
-                            self._sim_trade_count = self._sim_trade_count + 1
-                            self._sim_entry_event_bar = self.bar_index
-                            self._sim_entry_event_side = pending_side
-                            self._sim_entry_event_price = entry_price
+            # Policy 2 trails only after the previous completed candle has moved
+            # at least one initial R in favor. The stop can only tighten.
+            if (self._sim_side != 0 and self._sim_policy_index == 2
+                    and len(self.close) >= 2 and atr_previous > 0
+                    and not isnan(self._sim_initial_risk_per_unit)):
+                previous_move = (
+                    (self.close[1] - self._sim_entry_price) * self._sim_side
+                )
+                if previous_move >= self._sim_initial_risk_per_unit:
+                    if self._sim_side > 0:
+                        trailing_stop = (
+                            fast_ema[1] - atr_previous * stop_buffer_atr
+                        )
+                        breakeven_stop = (
+                            self._sim_entry_price
+                            + self._sim_entry_price * self._sim_entry_cost_pct / 100.0
+                        )
+                        if trailing_stop < breakeven_stop:
+                            trailing_stop = breakeven_stop
+                        if trailing_stop > self._sim_stop:
+                            self._sim_stop = trailing_stop
                             self._sim_stop_ref_event_bar = self.bar_index
-                            self._sim_stop_ref_event_price = pending_stop
-                            self._sim_tp_ref_event_bar = self.bar_index
-                            self._sim_tp_ref_event_price = pending_target
+                            self._sim_stop_ref_event_price = self._sim_stop
+                    else:
+                        trailing_stop = (
+                            fast_ema[1] + atr_previous * stop_buffer_atr
+                        )
+                        breakeven_stop = (
+                            self._sim_entry_price
+                            - self._sim_entry_price * self._sim_entry_cost_pct / 100.0
+                        )
+                        if trailing_stop > breakeven_stop:
+                            trailing_stop = breakeven_stop
+                        if trailing_stop < self._sim_stop:
+                            self._sim_stop = trailing_stop
+                            self._sim_stop_ref_event_bar = self.bar_index
+                            self._sim_stop_ref_event_price = self._sim_stop
+
+            reverse_confirmed = False
+            if (continuous_exposure and self._sim_side != 0
+                    and pending_side == -self._sim_side and pending_side != 0
+                    and not self._sim_risk_locked):
+                if self._sim_reverse_candidate_side == pending_side:
+                    self._sim_reverse_confirm_count = (
+                        self._sim_reverse_confirm_count + 1
+                    )
+                else:
+                    self._sim_reverse_candidate_side = pending_side
+                    self._sim_reverse_confirm_count = 1
+                if self._sim_reverse_confirm_count >= reverse_confirm_bars:
+                    reverse_confirmed = True
+            else:
+                self._sim_reverse_confirm_count = 0
+                self._sim_reverse_candidate_side = 0
+
+            entry_price = self.open[0]
+            entry_geometry_ok = False
+            entry_mtf_ok = False
+            entry_risk_ok = False
+            entry_stop_distance = nan
+            entry_reward_distance = nan
+            entry_risk_per_unit = nan
+            if pending_side > 0 and mtf_long_ok:
+                entry_mtf_ok = True
+            elif pending_side < 0 and mtf_short_ok:
+                entry_mtf_ok = True
+            if pending_side > 0:
+                if entry_price > pending_stop and entry_price < pending_target:
+                    entry_geometry_ok = True
+                    entry_stop_distance = entry_price - pending_stop
+                    entry_reward_distance = pending_target - entry_price
+            elif pending_side < 0:
+                if entry_price < pending_stop and entry_price > pending_target:
+                    entry_geometry_ok = True
+                    entry_stop_distance = pending_stop - entry_price
+                    entry_reward_distance = entry_price - pending_target
+
+            if (entry_geometry_ok and entry_mtf_ok
+                    and not isnan(pending_max_stop_distance)
+                    and entry_stop_distance > 0):
+                entry_cost_per_unit = entry_price * round_trip_cost_pct / 100.0
+                entry_risk_per_unit = entry_stop_distance + entry_cost_per_unit
+                entry_net_reward = entry_reward_distance - entry_cost_per_unit
+                entry_reward_risk = nan
+                if entry_risk_per_unit > 0:
+                    entry_reward_risk = entry_net_reward / entry_risk_per_unit
+                if (entry_stop_distance <= pending_max_stop_distance
+                        and entry_net_reward > 0
+                        and entry_reward_risk >= min_reward_risk):
+                    entry_risk_ok = True
+
+            allow_entry = self._sim_side == 0
+            if (self._sim_side != 0 and reverse_confirmed
+                    and entry_mtf_ok and not self._sim_risk_locked):
+                reverse_exit_type = 2
+                reverse_exit_price = entry_price
+                if self._sim_side > 0:
+                    if entry_price <= self._sim_stop:
+                        reverse_exit_type = -1
+                    elif entry_price >= self._sim_target:
+                        reverse_exit_type = 1
+                else:
+                    if entry_price >= self._sim_stop:
+                        reverse_exit_type = -1
+                    elif entry_price <= self._sim_target:
+                        reverse_exit_type = 1
+                self._settle_sim_trade(
+                    reverse_exit_price, reverse_exit_type,
+                    account_equity_quote, max_drawdown_pct,
+                )
+                if reverse_exit_type == 2 and entry_risk_ok:
+                    allow_entry = True
+                else:
+                    self._sim_cooldown_until_bar = (
+                        self.bar_index + stop_cooldown_bars
+                    )
+                self._sim_reverse_confirm_count = 0
+                self._sim_reverse_candidate_side = 0
+            elif (continuous_exposure and self._sim_side != 0
+                    and pending_side == -self._sim_side and not entry_mtf_ok):
+                self._sim_reverse_confirm_count = 0
+                self._sim_reverse_candidate_side = 0
+
+            # Recheck MTF, gap geometry, estimated costs and risk at the next open.
+            # A confirmed reversal closes the old side first, then opens only if the
+            # opposite plan still passes every entry gate. No live order is sent.
+            if (allow_entry and pending_side != 0 and entry_risk_ok
+                    and not self._sim_risk_locked
+                    and self.bar_index >= self._sim_cooldown_until_bar):
+                sim_units = 1.0
+                entry_equity = account_equity_quote + self._sim_realized_pnl
+                if (equity_configured and risk_per_trade_pct > 0.0
+                        and entry_equity > 0.0):
+                    entry_risk_budget = entry_equity * risk_per_trade_pct / 100.0
+                    sim_units = entry_risk_budget / entry_risk_per_unit
+                if sim_units > 0.0:
+                    self._sim_side = pending_side
+                    self._sim_entry_price = entry_price
+                    self._sim_entry_time = self.time[0]
+                    self._sim_stop = pending_stop
+                    self._sim_target = pending_target
+                    self._sim_units = sim_units
+                    self._sim_entry_cost_pct = round_trip_cost_pct
+                    self._sim_initial_risk_per_unit = entry_risk_per_unit
+                    self._sim_policy_index = pending_policy_index
+                    self._sim_regime_index = pending_regime_index
+                    self._sim_trade_count = self._sim_trade_count + 1
+                    self._sim_entry_event_bar = self.bar_index
+                    self._sim_entry_event_side = pending_side
+                    self._sim_entry_event_price = entry_price
+                    self._sim_stop_ref_event_bar = self.bar_index
+                    self._sim_stop_ref_event_price = pending_stop
+                    self._sim_tp_ref_event_bar = self.bar_index
+                    self._sim_tp_ref_event_price = pending_target
+                    self._sim_reverse_confirm_count = 0
+                    self._sim_reverse_candidate_side = 0
 
         # Check open simulated positions on every live update. If one OHLC bar touches
         # both levels, resolve it conservatively as a stop-out before a target fill.
@@ -1156,63 +1522,74 @@ class Main(MainContext):
                 exit_type = 1
                 exit_price = self._sim_target
 
+            if exit_type == 0 and self._sim_risk_locked:
+                exit_type = -2
+                exit_price = current_price
+
             if exit_type != 0:
-                trade_move = (exit_price - self._sim_entry_price) * self._sim_side
-                trade_cost = self._sim_entry_price * round_trip_cost_pct / 100.0
-                trade_pnl = (trade_move - trade_cost) * self._sim_units
-                self._sim_realized_pnl = self._sim_realized_pnl + trade_pnl
-                self._sim_exit_event_bar = self.bar_index
-                self._sim_exit_event_type = exit_type
-                self._sim_exit_event_price = exit_price
-                if exit_type > 0:
-                    self._sim_tp_count = self._sim_tp_count + 1
-                else:
-                    self._sim_stop_count = self._sim_stop_count + 1
-
-                if not isnan(self._sim_entry_time) and not isnan(self.time[0]):
-                    exit_line_color = color.rgba(0, 255, 0, 1.0)
-                    if exit_type < 0:
-                        exit_line_color = color.rgba(255, 0, 180, 1.0)
-                    self.chart.draw(
-                        LineSegment(
-                            AbsolutePosition(self._sim_entry_time, self._sim_entry_price),
-                            AbsolutePosition(self.time[0], exit_price),
-                            color=exit_line_color,
-                            line_width=2,
-                        )
+                self._settle_sim_trade(
+                    exit_price, exit_type, account_equity_quote, max_drawdown_pct,
+                )
+                if exit_type == 1 or exit_type == -1:
+                    self._sim_cooldown_until_bar = (
+                        self.bar_index + stop_cooldown_bars
                     )
+                self._sim_reverse_confirm_count = 0
+                self._sim_reverse_candidate_side = 0
 
-                self._sim_side = 0
-                self._sim_entry_price = nan
-                self._sim_entry_time = nan
-                self._sim_stop = nan
-                self._sim_target = nan
-                self._sim_units = 0.0
+        # Queue continuous-mode entries from a strong MTF regime and reversals
+        # only from the higher threshold. Legacy setup-only mode remains available.
+        next_pending_side = 0
+        next_pending_stop = nan
+        next_pending_target = nan
+        next_pending_max_stop_distance = nan
+        if (self._sim_exit_event_bar != self.bar_index
+                and not self._sim_risk_locked
+                and self.bar_index >= self._sim_cooldown_until_bar):
+            if continuous_exposure:
+                if self._sim_side == 0:
+                    next_long_ready = long_candidate or long_regime_ready
+                    next_short_ready = short_candidate or short_regime_ready
+                    if next_long_ready and not next_short_ready:
+                        next_pending_side = 1
+                        next_pending_stop = long_stop_value
+                        next_pending_target = long_target_value
+                    elif next_short_ready and not next_long_ready:
+                        next_pending_side = -1
+                        next_pending_stop = short_stop_value
+                        next_pending_target = short_target_value
+                elif self._sim_side > 0 and short_reverse_candidate:
+                    next_pending_side = -1
+                    next_pending_stop = short_stop_value
+                    next_pending_target = short_target_value
+                elif self._sim_side < 0 and long_reverse_candidate:
+                    next_pending_side = 1
+                    next_pending_stop = long_stop_value
+                    next_pending_target = long_target_value
+            elif self._sim_side == 0:
+                if long_candidate and not short_candidate:
+                    next_pending_side = 1
+                    next_pending_stop = long_stop_value
+                    next_pending_target = long_target_value
+                elif short_candidate and not long_candidate:
+                    next_pending_side = -1
+                    next_pending_stop = short_stop_value
+                    next_pending_target = short_target_value
 
-        # Save only this candle's final eligible setup for a next-open paper fill.
-        # No new pending entry is queued on a candle where a trade just exited.
-        if (self._sim_side == 0
-                and self._sim_exit_event_bar != self.bar_index):
-            if long_candidate:
-                self._pending_side = 1
-                self._pending_stop = long_stop_value
-                self._pending_target = long_target_value
-                self._pending_max_stop_distance = atr_value * max_stop_atr
-            elif short_candidate:
-                self._pending_side = -1
-                self._pending_stop = short_stop_value
-                self._pending_target = short_target_value
-                self._pending_max_stop_distance = atr_value * max_stop_atr
-            else:
-                self._pending_side = 0
-                self._pending_stop = nan
-                self._pending_target = nan
-                self._pending_max_stop_distance = nan
+        if next_pending_side != 0:
+            self._pending_side = next_pending_side
+            self._pending_stop = next_pending_stop
+            self._pending_target = next_pending_target
+            self._pending_max_stop_distance = atr_value * max_stop_atr
+            self._pending_policy_index = selected_policy_index
+            self._pending_regime_index = regime_index
         else:
             self._pending_side = 0
             self._pending_stop = nan
             self._pending_target = nan
             self._pending_max_stop_distance = nan
+            self._pending_policy_index = 1
+            self._pending_regime_index = 0
 
         if self._sim_entry_event_bar == self.bar_index:
             if self._sim_entry_event_side > 0:
@@ -1224,9 +1601,9 @@ class Main(MainContext):
         if self._sim_tp_ref_event_bar == self.bar_index:
             tp_reference_marker = self._sim_tp_ref_event_price
         if self._sim_exit_event_bar == self.bar_index:
-            if self._sim_exit_event_type > 0:
+            if self._sim_exit_event_type == 1:
                 tp_exit_marker = self._sim_exit_event_price
-            elif self._sim_exit_event_type < 0:
+            elif self._sim_exit_event_type == -1 or self._sim_exit_event_type == -2:
                 stop_exit_marker = self._sim_exit_event_price
 
         report_text = 'Mixed price action'
@@ -1278,6 +1655,8 @@ class Main(MainContext):
             scenario_text = 'MTF FILTER: WAIT ALIGNMENT'
         elif not risk_ready and not long_candidate and not short_candidate:
             scenario_text = 'SIM: 1 UNIT'
+        if self._sim_risk_locked:
+            scenario_text = 'HARD DRAWDOWN LOCK'
 
         price_precision = self.info.price_precision
         if price_precision > 5:
@@ -1300,8 +1679,10 @@ class Main(MainContext):
         if mtf_4h['score'] > 0:
             mtf_4h_text = '+' + mtf_4h_text
         mtf_text = 'MTF NEEDS 1M CHART'
+        mtf_status = 'NEEDS 1M'
         if self._mtf_chart_is_1m:
             if not mtf_ready:
+                mtf_status = 'WARMUP'
                 mtf_text = 'MTF WARMUP 5m/15m/1h/4h'
             else:
                 mtf_status = 'WAIT'
@@ -1357,18 +1738,41 @@ class Main(MainContext):
             sim_state_text = 'BUY NEXT'
         elif self._pending_side < 0:
             sim_state_text = 'SELL NEXT'
+        if self._sim_side > 0 and self._pending_side < 0:
+            sim_state_text = 'BUY OPEN / REV WATCH'
+        elif self._sim_side < 0 and self._pending_side > 0:
+            sim_state_text = 'SELL OPEN / REV WATCH'
         if self._sim_exit_event_bar == self.bar_index:
-            if self._sim_exit_event_type > 0:
+            if self._sim_exit_event_type == 1:
                 sim_state_text = 'TP HIT'
-            elif self._sim_exit_event_type < 0:
+            elif self._sim_exit_event_type == -1:
                 sim_state_text = 'STOP HIT'
+            elif self._sim_exit_event_type == 2:
+                sim_state_text = 'REVERSED'
+            elif self._sim_exit_event_type == -2:
+                sim_state_text = 'RISK LOCK EXIT'
 
+        active_policy_name = selected_policy_name
+        if self._sim_side != 0:
+            if self._sim_policy_index == 0:
+                active_policy_name = 'SAFE'
+            elif self._sim_policy_index == 1:
+                active_policy_name = 'BASE'
+            else:
+                active_policy_name = 'TRAIL'
+        policy_slot = regime_index * 3
+        context_policy_samples = (
+            self._sim_policy_counts[policy_slot]
+            + self._sim_policy_counts[policy_slot + 1]
+            + self._sim_policy_counts[policy_slot + 2]
+        )
         sim_summary = (
             'SIM ' + sim_state_text + ' | N ' + str(self._sim_trade_count)
             + ' TP ' + str(self._sim_tp_count) + ' SL ' + str(self._sim_stop_count)
+            + ' REV ' + str(self._sim_reversal_count)
         )
         sim_pnl_label = 'NET P/L/1U ' + str(round(self._sim_realized_pnl, 2))
-        if risk_ready:
+        if equity_configured:
             sim_pnl_label = 'NET P/L ' + str(round(self._sim_realized_pnl, 2))
 
         panel_text = (
@@ -1425,10 +1829,16 @@ class Main(MainContext):
             candle_reason = 'C-'
 
         signal_name = 'WAIT'
-        if long_candidate:
+        if self._sim_risk_locked:
+            signal_name = 'RISK LOCK'
+        elif long_candidate:
             signal_name = 'BUY SETUP'
         elif short_candidate:
             signal_name = 'SELL SETUP'
+        elif continuous_exposure and long_regime_ready:
+            signal_name = 'LONG REGIME'
+        elif continuous_exposure and short_regime_ready:
+            signal_name = 'SHORT REGIME'
         elif long_mtf_blocked:
             signal_name = 'BUY MTF BLOCK'
         elif short_mtf_blocked:
@@ -1439,11 +1849,17 @@ class Main(MainContext):
             signal_name = 'SELL BLOCKED'
 
         plan_text = 'WAIT: no simulated position'
+        if self._sim_risk_locked and self._sim_side == 0:
+            plan_text = 'WAIT: HARD DRAWDOWN LOCK'
         if self._sim_exit_event_bar == self.bar_index:
-            if self._sim_exit_event_type > 0:
+            if self._sim_exit_event_type == 1:
                 plan_text = 'TAKE PROFIT FILLED @ ' + str(round(self._sim_exit_event_price, price_precision))
-            elif self._sim_exit_event_type < 0:
+            elif self._sim_exit_event_type == -1:
                 plan_text = 'STOP FILLED @ ' + str(round(self._sim_exit_event_price, price_precision))
+            elif self._sim_exit_event_type == 2:
+                plan_text = 'REVERSED AT OPEN @ ' + str(round(self._sim_exit_event_price, price_precision))
+            elif self._sim_exit_event_type == -2:
+                plan_text = 'DRAWDOWN LOCK @ ' + str(round(self._sim_exit_event_price, price_precision))
         elif self._sim_side > 0:
             plan_text = (
                 'BUY @ ' + str(round(self._sim_entry_price, price_precision))
@@ -1480,7 +1896,9 @@ class Main(MainContext):
 
         cost_text = 'COST ' + str(round(round_trip_cost_pct, 2)) + '%'
         size_text = 'SIM 1 UNIT | ' + cost_text
-        if not risk_ready:
+        if self._sim_risk_locked:
+            size_text = 'RISK LOCK | ' + cost_text
+        elif not equity_configured:
             size_text = 'SIM 1 UNIT | EQ unset | ' + cost_text
         elif self._sim_side != 0:
             size_text = 'SIM QTY~' + str(round(self._sim_units, 8)) + ' | ' + cost_text
@@ -1556,6 +1974,109 @@ class Main(MainContext):
             + self._center_text_line(tick_average_text, tick_line_width)
         )
         self._analyst_label.text = analyst_text
+
+        chat_answer = market_text + ' | ' + mtf_status + ' | SCORE ' + confluence_text
+        if chart_chat_question == 'Why holding?':
+            if self._sim_side > 0:
+                chat_answer = 'Hold LONG; opposite confirmation '
+                if self._pending_side < 0:
+                    chat_answer = (
+                        chat_answer + str(self._sim_reverse_confirm_count)
+                        + '/' + str(reverse_confirm_bars)
+                    )
+                else:
+                    chat_answer = chat_answer + 'not qualified yet'
+            elif self._sim_side < 0:
+                chat_answer = 'Hold SHORT; opposite confirmation '
+                if self._pending_side > 0:
+                    chat_answer = (
+                        chat_answer + str(self._sim_reverse_confirm_count)
+                        + '/' + str(reverse_confirm_bars)
+                    )
+                else:
+                    chat_answer = chat_answer + 'not qualified yet'
+            elif self._pending_side > 0:
+                chat_answer = 'LONG queued; rechecked at next open'
+            elif self._pending_side < 0:
+                chat_answer = 'SHORT queued; rechecked at next open'
+            else:
+                chat_answer = 'No open position; waiting for a safe regime'
+        elif chart_chat_question == 'Risk / levels':
+            if self._sim_side > 0:
+                chat_answer = (
+                    'LONG SL ' + str(round(self._sim_stop, price_precision))
+                    + ' TP ' + str(round(self._sim_target, price_precision))
+                )
+            elif self._sim_side < 0:
+                chat_answer = (
+                    'SHORT SL ' + str(round(self._sim_stop, price_precision))
+                    + ' TP ' + str(round(self._sim_target, price_precision))
+                )
+            elif self._pending_side > 0:
+                chat_answer = (
+                    'LONG plan SL ' + str(round(self._pending_stop, price_precision))
+                    + ' TP ' + str(round(self._pending_target, price_precision))
+                )
+            elif self._pending_side < 0:
+                chat_answer = (
+                    'SHORT plan SL ' + str(round(self._pending_stop, price_precision))
+                    + ' TP ' + str(round(self._pending_target, price_precision))
+                )
+            else:
+                chat_answer = 'No valid stop/target plan right now'
+        elif chart_chat_question == 'Why waiting?':
+            if self._sim_risk_locked:
+                chat_answer = 'LOCKED: realized drawdown cap reached'
+            elif not self._mtf_chart_is_1m:
+                chat_answer = 'Use 1m chart; MTF signals are disabled here'
+            elif not mtf_ready:
+                chat_answer = 'Building completed 5m/15m/1h/4h context'
+            elif self.bar_index < self._sim_cooldown_until_bar:
+                chat_answer = 'Post-exit cooldown; safety gate is active'
+            elif self._sim_side != 0:
+                chat_answer = 'Holding; reversal needs stronger opposite MTF'
+            elif self._pending_side != 0:
+                chat_answer = 'Queued for next open; gap/risk checks remain'
+            elif long_setup_candidate and not long_risk_ok:
+                chat_answer = 'LONG blocked by stop distance or net R/R'
+            elif short_setup_candidate and not short_risk_ok:
+                chat_answer = 'SHORT blocked by stop distance or net R/R'
+            elif long_mtf_blocked or short_mtf_blocked:
+                chat_answer = 'Waiting for completed higher-timeframe alignment'
+            else:
+                chat_answer = scenario_text
+
+        chat_risk_text = 'EQ UNSET: 1 unit; % risk cap unavailable'
+        if equity_configured:
+            chat_risk_text = (
+                'DD ' + str(round(self._sim_drawdown_pct, 2)) + '/'
+                + str(round(max_drawdown_pct, 1)) + '% | RISK '
+                + str(round(risk_per_trade_pct, 2)) + '%'
+            )
+        if self._sim_risk_locked:
+            chat_risk_text = 'RISK LOCK | DD ' + str(round(self._sim_drawdown_pct, 2)) + '%'
+        chat_mode_text = 'CONTINUOUS SIM'
+        if not continuous_exposure:
+            chat_mode_text = 'SETUP-ONLY SIM'
+        if high_volatility:
+            volatility_text = 'HIGH VOL'
+        else:
+            volatility_text = 'VOL OK'
+        chat_policy_text = (
+            'EXIT ' + active_policy_name + ' | SAMPLES '
+            + str(int(context_policy_samples)) + ' | ' + volatility_text
+        )
+        self._chat_label.text = (
+            'JET CHAT | RULE-BASED\n'
+            + 'Q: ' + chart_chat_question + '\n'
+            + 'A: ' + chat_answer + '\n'
+            + 'SIM: ' + sim_state_text + ' | ' + chat_mode_text + '\n'
+            + chat_policy_text + '\n'
+            + chat_risk_text + '\n'
+            + 'PAPER ONLY - NO LIVE ORDERS'
+        )
+        self._chat_label.text_color = color.rgba(235, 243, 255, 1.0)
+
         # Keep captions white; only the numeric buy/sell counters flash.
         self._tick_buy_count_label.text = tick_buy_count_text
         self._tick_sell_caption_label.text = tick_sell_caption
@@ -1575,6 +2096,7 @@ class Main(MainContext):
         self.chart.draw(self._support_label)
         self.chart.draw(self._resistance_label)
         self.chart.draw(self._analyst_label)
+        self.chart.draw(self._chat_label)
         self.chart.draw(self._tick_buy_count_label)
         self.chart.draw(self._tick_sell_caption_label)
         self.chart.draw(self._tick_sell_count_label)

@@ -1,25 +1,34 @@
 # Adaptive Paper-Trading System: Research and Build Plan
 
-**Status:** design research only; no change to entry/exit behavior has been made in this step.  
-**Mode selected:** simulated long/short exposure that reverses when the opposite regime is sufficiently strong.  
+**Status:** prototype implementation is now in `trading` and `fighter_jet.indie`; Python/synthetic checks passed, but Exness compile and chart-visual validation are still outstanding.
+**Mode selected:** simulated long/short exposure that reverses only after a confirmed opposing regime, with stop cooldowns and risk locks.
+**Chat panel:** top-right rule-based chart readout with a selectable prompt in indicator settings; it is not a free-typing or external-LLM chat service.
 **Important:** this is not a promise of profitability, and the script remains a paper simulator with no live orders.
 
 ## Executive recommendation
 
-Build this in stages. First make the simulator measure every decision and trade correctly; then evaluate a small, bounded set of adaptive policies offline; only after repeated out-of-sample improvement should any learned policy be used in the indicator.
+The first in-indicator prototype is implemented with bounded, rule-based exit templates and in-memory outcome scoring. Treat it as experimental: next add durable/exportable trade logs, then evaluate the policies in a separate walk-forward harness. Do not trust the selector or change to live execution without repeated out-of-sample improvement.
+
+## Implemented prototype and remaining gaps
+
+- Continuous exposure is enabled by default, while setup-only mode remains available for comparison. New directions still wait for MTF warm-up and valid structural/ATR stop, target, cost, room, and reward/risk gates. Reversals require the stronger opposite regime for the configured number of 1m bars. TP/SL exits start a cooldown.
+- A bounded three-template selector adapts target distance and trailing behavior by range/trend/high-volatility context. It rotates templates during warm-up and only promotes a non-baseline template after at least five outcomes per template in that context. Rewards use net R after configured costs, with modest drawdown and reversal penalties.
+- The trend template can trail only after at least +1 initial R, and the stop can only tighten. A realized-equity drawdown cap can lock further entries when quote-currency equity is configured. Without equity, the simulator uses one unit and cannot calculate percentage risk or the drawdown cap.
+- The selector keeps only per-context reward sums/counts in runtime memory. It does **not** yet persist a model or export a complete feature/outcome log; reloading/reinitializing resets these scores. It is a simple rule-based paper selector, not an adaptive AI service.
+- The chart's “JET CHAT” box is a read-only rule-based explanation panel. Users choose one of four prompts in the indicator settings; Indie's drawing label does not accept free-form chart input or call an LLM.
 
 For “always have a trade,” use a **two-sided exposure state machine** after the MTF warm-up: LONG or SHORT, with hysteresis so it does not reverse on every noisy signal. Keep safety exceptions for missing/stale data, MTF warm-up, a hard drawdown limit, and a stop-out cooldown. Those exceptions mean exposure cannot honestly be guaranteed at every instant. Forcing re-entry after every stop without a cooldown can create a rapid loss loop.
 
 ## What the current script already does
 
-The current script is a **rule-based paper simulator**, not an AI learner. It already has useful pieces for adaptive exits:
+The current script remains a **rule-based paper simulator**, not an AI learner or live trading system. It now has a small experimental outcome selector:
 
-- It forms a structural stop from recent support/resistance, a pullback, or a breakout/retest area, then adds an ATR buffer.
-- It starts the target from an ATR multiple and may bring it closer to nearby prior support/resistance.
-- It rejects plans whose stop is too large, whose estimated net reward/risk is too small after configured costs, or which lack room to the next obstacle.
-- It sizes simulated positions from the configured risk budget when equity is supplied.
-- The chosen stop and target are **fixed after entry**. There is not yet a learned policy, a regime-specific exit selector, or a per-trade training log.
-- The chart script keeps aggregate counts/P&L in runtime state. Recompiling or reloading reinitializes that state, so it is not a durable model store.
+- It forms structural stops from recent support/resistance, a pullback, or a breakout/retest area, then adds an ATR buffer.
+- It selects one of three bounded exit templates—SAFE, BASE, or TRAIL—within the existing structural, max-ATR-stop, room, cost, and net reward/risk gates. The target scale responds to range/trend/high-volatility context; the trend template can trail after +1 initial R, and a stop can only tighten.
+- It rotates templates while gathering outcomes, then selects a non-baseline template only after at least five outcomes per template in that context and a 0.10 net-R advantage over baseline. Reward is net R after estimated costs, less drawdown-increase and reversal penalties. These thresholds are safeguards, not proof of edge.
+- Continuous long/short paper exposure is on by default, with a stricter opposite-regime threshold, 2-bar confirmation by default, stop/target cooldown, a maximum initial stop distance, and a realized-drawdown lock when equity is supplied. Setup-only mode remains available for comparison.
+- When quote-currency equity is supplied, simulated size is based on the risk budget. Without it, the script simulates one unit; percentage risk and drawdown cannot be computed.
+- The selector stores only reward sums/counts by regime/template in runtime memory. It does not yet export complete per-trade features, and reload/reinitialization clears its state. A durable, exportable training log remains a key next step.
 
 Earlier proxy backtests in this project did **not** establish a robust edge: tested baselines/filters had full-period zero-cost profit factors below 1 and inconsistent results across costs and splits. That makes a carefully controlled evaluation more important than adding complexity or maximizing trade count.
 
@@ -34,7 +43,7 @@ A deep RL agent would have many ways to overfit the historical path and is diffi
 - fixed target versus a conservative trailing rule;
 - reversal confirmation/cooldown length.
 
-Do not allow the learner to bypass the hard maximum-risk, minimum-net-reward, or data-quality gates. Start with a frozen baseline and a shadow learner that records what it *would* choose before allowing it to affect simulated positions.
+The current prototype explores these bounded templates only in paper simulation and cannot bypass the hard maximum-risk, minimum-net-reward, or data-quality gates. For any future version beyond paper-only use, keep a frozen baseline and shadow selector that records what it *would* choose until walk-forward validation passes.
 
 ### What to log for every simulated decision/trade
 
@@ -89,13 +98,14 @@ A candidate policy should still satisfy the configured cost-adjusted minimum rew
 4. Track net expectancy in R, profit factor, maximum drawdown and drawdown duration, exposure, turnover/reversal count, stop-outs, and results by volatility/trend regime. Treat hit rate as secondary.
 5. Keep the learner in **shadow mode** until it beats the frozen baseline across multiple walk-forward windows without unacceptable drawdown. Then paper-test the frozen version in replay/live updates before considering any further change.
 
-## Suggested implementation order
+## Next steps before trusting the prototype
 
-1. Add bounded per-trade/decision logging and a simple equity/drawdown series to the paper simulator.
-2. Add a continuous-exposure paper mode with hysteresis, cooldown, and explicit safety overrides; leave the current flat-when-no-setup mode available for comparison.
-3. Add regime labels and a small fixed grid of safe stop/target templates; compare them without learning.
-4. Add a shadow contextual selector using the reward above and minimum sample requirements.
-5. Only after walk-forward evidence, let the selector choose the simulated exit template. Keep learning/versioning outside the chart script unless a durable storage mechanism is confirmed; the current `self` state is reset on reload.
+1. Add a bounded, exportable per-trade/decision log with timestamp, symbol/timeframe, feature snapshot, selected template, entry/exit reason, net P&L, net R, and stop/target distances. Current runtime state keeps only aggregate rewards/counts.
+2. Build a separate chronological walk-forward harness comparing setup-only mode, continuous exposure, fixed exits, and the three adaptive templates on identical data.
+3. Validate costs, gap fills, stop/target order, drawdown, turnover, exposure, and results by volatility/trend regime. Keep untuned data for one final holdout.
+4. Re-run the selector in shadow mode against the frozen baseline; use multiple out-of-sample windows and a minimum sample threshold before trusting a policy choice.
+5. Keep model persistence/versioning outside the chart script unless a durable storage mechanism is confirmed. In the indicator, treat scores as session/replay-local; reload/reinitialization resets them.
+6. Compile and visually check in Exness, including chart replay and live updates, especially the top-right readout position and the trailing-stop behavior.
 
 ## Further reading
 
