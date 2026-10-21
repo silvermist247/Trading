@@ -2349,6 +2349,113 @@ class Main(MainContext):
                 entry_progress_pct = 90
             entry_progress_detail = chat_action_text
 
+        setup_data_pct = 0
+        if mtf_ready or (opportunity_entries and mtf_5m_partial_ready):
+            setup_data_pct = 25
+        elif opportunity_entries:
+            required_direction_5m_bars = trend_length * 2
+            if required_direction_5m_bars < 1:
+                required_direction_5m_bars = 1
+            direction_closed_5m_bars = int(mtf_5m['closed_count'])
+            if direction_closed_5m_bars < 0:
+                direction_closed_5m_bars = 0
+            if direction_closed_5m_bars > required_direction_5m_bars:
+                direction_closed_5m_bars = required_direction_5m_bars
+            setup_data_pct = int(
+                direction_closed_5m_bars * 25.0 / required_direction_5m_bars
+            )
+        else:
+            direction_ready_frames = 0
+            for mtf_frame in self._mtf_frames:
+                if mtf_frame['ready']:
+                    direction_ready_frames = direction_ready_frames + 1
+            setup_data_pct = int(direction_ready_frames * 25.0 / 4.0)
+
+        buy_readiness_pct = 0
+        sell_readiness_pct = 0
+        if (self._mtf_chart_is_1m and not self._sim_risk_locked
+                and self.bar_index >= self._sim_cooldown_until_bar):
+            buy_readiness_pct = setup_data_pct
+            sell_readiness_pct = setup_data_pct
+            if mtf_long_entry_ok:
+                buy_readiness_pct = buy_readiness_pct + 20
+            if mtf_short_entry_ok:
+                sell_readiness_pct = sell_readiness_pct + 20
+            if market_trending and ema_up:
+                buy_readiness_pct = buy_readiness_pct + 15
+            if market_trending and not ema_up:
+                sell_readiness_pct = sell_readiness_pct + 15
+
+            buy_score_points = confluence
+            if buy_score_points < 0:
+                buy_score_points = 0
+            if buy_score_points > 5:
+                buy_score_points = 5
+            sell_score_points = -confluence
+            if sell_score_points < 0:
+                sell_score_points = 0
+            if sell_score_points > 5:
+                sell_score_points = 5
+            buy_readiness_pct = buy_readiness_pct + int(
+                buy_score_points * 15.0 / 5.0
+            )
+            sell_readiness_pct = sell_readiness_pct + int(
+                sell_score_points * 15.0 / 5.0
+            )
+
+            if long_momentum_ok:
+                buy_readiness_pct = buy_readiness_pct + 10
+            if short_momentum_ok:
+                sell_readiness_pct = sell_readiness_pct + 10
+            if volume_ok:
+                buy_readiness_pct = buy_readiness_pct + 5
+                sell_readiness_pct = sell_readiness_pct + 5
+            if long_risk_ok and long_room_ok:
+                buy_readiness_pct = buy_readiness_pct + 5
+            if short_risk_ok and short_room_ok:
+                sell_readiness_pct = sell_readiness_pct + 5
+            if long_candidate or long_regime_ready:
+                buy_readiness_pct = buy_readiness_pct + 5
+            if short_candidate or short_regime_ready:
+                sell_readiness_pct = sell_readiness_pct + 5
+
+            if self._sim_side == 0 and self._pending_side > 0:
+                buy_readiness_pct = 100
+            elif self._sim_side == 0 and self._pending_side < 0:
+                sell_readiness_pct = 100
+            elif self._sim_side > 0 and self._pending_side < 0:
+                sell_readiness_pct = int(
+                    self._sim_reverse_confirm_count * 90.0 / reverse_confirm_bars
+                )
+            elif self._sim_side < 0 and self._pending_side > 0:
+                buy_readiness_pct = int(
+                    self._sim_reverse_confirm_count * 90.0 / reverse_confirm_bars
+                )
+
+        if buy_readiness_pct > 100:
+            buy_readiness_pct = 100
+        if sell_readiness_pct > 100:
+            sell_readiness_pct = 100
+        buy_fill_count = int(buy_readiness_pct / 10)
+        sell_fill_count = int(sell_readiness_pct / 10)
+        if buy_fill_count > 10:
+            buy_fill_count = 10
+        if sell_fill_count > 10:
+            sell_fill_count = 10
+        buy_bar_text = '['
+        sell_bar_text = '['
+        for direction_bar_index in range(10):
+            if direction_bar_index < buy_fill_count:
+                buy_bar_text = buy_bar_text + '#'
+            else:
+                buy_bar_text = buy_bar_text + '-'
+            if direction_bar_index < sell_fill_count:
+                sell_bar_text = sell_bar_text + '#'
+            else:
+                sell_bar_text = sell_bar_text + '-'
+        buy_bar_text = buy_bar_text + ']'
+        sell_bar_text = sell_bar_text + ']'
+
         progress_fill_count = int(entry_progress_pct / 10)
         if progress_fill_count > 10:
             progress_fill_count = 10
@@ -2360,9 +2467,11 @@ class Main(MainContext):
                 progress_bar_text = progress_bar_text + '-'
         progress_bar_text = progress_bar_text + ']'
         self._progress_label.text = (
-            'NEXT SIM ORDER | READINESS '
-            + str(entry_progress_pct) + '%\n'
-            + progress_bar_text + ' ' + entry_progress_data + '\n'
+            'BUY/SELL GATE READINESS | NOT WIN ODDS\n'
+            + 'BUY  ' + buy_bar_text + ' ' + str(buy_readiness_pct) + '%\n'
+            + 'SELL ' + sell_bar_text + ' ' + str(sell_readiness_pct) + '%\n'
+            + 'NEXT ' + progress_bar_text + ' '
+            + str(entry_progress_pct) + '% | ' + entry_progress_data + '\n'
             + entry_progress_detail
         )
 
