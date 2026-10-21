@@ -15,8 +15,9 @@ from indie.drawings import (
 # Rule-based OHLCV paper simulator with a small in-memory contextual outcome selector;
 # it is not an AI service, durable learner, broker integration, or order system.
 # Run on a 1-minute chart: completed 1m candles are aggregated into 5m, 15m, 1h, and 4h bars.
-# Other chart intervals show an MTF warning and block new entries; default warmup is about 84 hours.
-# MTF scores use only completed higher-timeframe bars; 1m conditions can change intrabar.
+# Other chart intervals block entries. Full MTF warmup is about 84 hours; opportunity mode may
+# use a confirmed 5m trend after its EMA/ATR are ready, while higher frames warm up. MTF scores
+# use completed bars; 1m conditions can change intrabar.
 # Higher-timeframe volume is the chart's volume field (possibly tick volume), not trader counts.
 # Pending signals are rechecked at the next 1m open. Stop/TP hits use candle ranges; if both
 # are touched in one bar, the simulator assumes the stop hit first. Exits/policy rewards reset
@@ -41,6 +42,11 @@ from indie.drawings import (
 @param.float('round_trip_cost_pct', default=0.0, min=0.0, max=2.0, step=0.05, title='Estimated round-trip costs (% notional; set broker estimate)')
 @param.float('account_equity_quote', default=0.0, min=0.0, max=1000000000.0, step=1.0, title='Optional equity in chart quote currency (0 simulates 1 unit)')
 @param.bool('continuous_exposure', default=True, title='Continuous simulated long/short exposure')
+@param.bool(
+    'opportunity_entries',
+    default=True,
+    title='Allow entries with aligned 5m before full MTF warm-up',
+)
 @param.int('reverse_confirm_bars', default=2, min=1, max=5, title='Opposite-regime confirmation (closed 1m bars)')
 @param.int('stop_cooldown_bars', default=1, min=1, max=20, title='Cooldown after TP/SL (1m bars)')
 @param.float('max_drawdown_pct', default=5.0, min=1.0, max=50.0, step=0.5, title='Hard cap: realized drawdown from peak (%)')
@@ -73,7 +79,7 @@ from indie.drawings import (
     color=color.rgba(0, 255, 0, 1.0),
     style=plot.marker_style.CIRCLE,
     position=plot.marker_position.CENTER,
-    size=6,
+    size=8,
     display_options=plot.MarkerDisplayOptions(
         pane=True, status_line=False, price_label=False,
     ),
@@ -83,7 +89,7 @@ from indie.drawings import (
     color=color.rgba(255, 0, 0, 1.0),
     style=plot.marker_style.CIRCLE,
     position=plot.marker_position.CENTER,
-    size=6,
+    size=8,
     display_options=plot.MarkerDisplayOptions(
         pane=True, status_line=False, price_label=False,
     ),
@@ -101,7 +107,7 @@ from indie.drawings import (
     color=color.rgba(0, 255, 0, 1.0),
     style=plot.marker_style.CIRCLE,
     position=plot.marker_position.CENTER,
-    size=6,
+    size=8,
     display_options=plot.MarkerDisplayOptions(
         pane=True, status_line=False, price_label=False,
     ),
@@ -111,7 +117,7 @@ from indie.drawings import (
     color=color.rgba(255, 0, 0, 1.0),
     style=plot.marker_style.CIRCLE,
     position=plot.marker_position.CENTER,
-    size=6,
+    size=8,
     display_options=plot.MarkerDisplayOptions(
         pane=True, status_line=False, price_label=False,
     ),
@@ -802,6 +808,7 @@ class Main(MainContext):
         round_trip_cost_pct,
         account_equity_quote,
         continuous_exposure,
+        opportunity_entries,
         reverse_confirm_bars,
         stop_cooldown_bars,
         max_drawdown_pct,
@@ -942,6 +949,11 @@ class Main(MainContext):
         for mtf_frame in self._mtf_frames:
             if not mtf_frame['ready']:
                 mtf_ready = False
+        mtf_5m_partial_ready = (
+            mtf_5m['closed_count'] >= trend_length * 2
+            and mtf_5m['trend'] != 0.0
+            and mtf_5m['atr_value'] > 0.0
+        )
         # Weighted MTF rule: 5m/15m/1h/4h scores weigh 1/2/3/4; 15m
         # direction must agree, while 1h and 4h must not oppose the entry.
         # This is a confluence filter, not a claim of an optimal or profitable strategy.
@@ -965,6 +977,24 @@ class Main(MainContext):
             and mtf_4h['trend'] <= 0
             and mtf_weighted_score <= -8
         )
+
+        # Opportunity mode permits entries before the full ~84h 4h history exists,
+        # but only after the 5m frame is ready and aligned. Any ready higher frame
+        # must not oppose that direction; 1m setup and risk gates still apply.
+        partial_mtf_long_ok = False
+        partial_mtf_short_ok = False
+        if (opportunity_entries and self._mtf_chart_is_1m and not mtf_ready
+                and mtf_5m_partial_ready):
+            partial_mtf_long_ok = mtf_5m['trend'] > 0
+            partial_mtf_short_ok = mtf_5m['trend'] < 0
+            for mtf_frame in self._mtf_frames:
+                if mtf_frame['ready']:
+                    if mtf_frame['trend'] < 0:
+                        partial_mtf_long_ok = False
+                    if mtf_frame['trend'] > 0:
+                        partial_mtf_short_ok = False
+        mtf_long_entry_ok = mtf_long_ok or partial_mtf_long_ok
+        mtf_short_entry_ok = mtf_short_ok or partial_mtf_short_ok
 
         # Transparent confluence points: EMA/ATR direction (2), Bollinger mid (1),
         # RSI extremes (1), and above-average volume in trend direction (1).
@@ -1141,6 +1171,23 @@ class Main(MainContext):
                     and current_price - prior_support <= atr_value * 0.5):
                 short_room_ok = False
 
+        # During partial-MTF warm-up, accept a confirmed local continuation only
+        # when 5m agrees, the 1m candle confirms, volume/momentum align, and room remains.
+        long_opportunity_continuation = (
+            opportunity_entries and partial_mtf_long_ok
+            and market_trending and ema_up
+            and confluence >= minimum_entry_score
+            and long_momentum_ok and volume_ok and bullish_confirmation
+            and current_price > fast_ema[0] and long_room_ok
+        )
+        short_opportunity_continuation = (
+            opportunity_entries and partial_mtf_short_ok
+            and market_trending and not ema_up
+            and confluence <= -minimum_entry_score
+            and short_momentum_ok and volume_ok and bearish_confirmation
+            and current_price < fast_ema[0] and short_room_ok
+        )
+
         # Risk gates: define a structural stop, reject excessive stop distances, and
         # require minimum estimated net reward/risk after the configured cost allowance.
         # Targets/stops remain references; this indicator cannot place or guarantee orders.
@@ -1191,6 +1238,8 @@ class Main(MainContext):
                 long_stop_anchor = self.low[0]
                 if prior_resistance < long_stop_anchor:
                     long_stop_anchor = prior_resistance
+            elif long_opportunity_continuation:
+                long_stop_anchor = self.low[0]
             elif long_ema_pullback:
                 long_stop_anchor = self.low[0]
             elif not isnan(support):
@@ -1207,6 +1256,8 @@ class Main(MainContext):
                 short_stop_anchor = self.high[0]
                 if prior_support > short_stop_anchor:
                     short_stop_anchor = prior_support
+            elif short_opportunity_continuation:
+                short_stop_anchor = self.high[0]
             elif short_ema_pullback:
                 short_stop_anchor = self.high[0]
             elif not isnan(resistance):
@@ -1250,19 +1301,25 @@ class Main(MainContext):
                 and not near_resistance and bullish_confirmation
                 and long_momentum_ok and long_room_ok)
                 or (long_breakout_retest and long_room_ok)
-                or (long_breakout_continuation and long_room_ok)):
+                or (long_breakout_continuation and long_room_ok)
+                or long_opportunity_continuation):
             long_setup_candidate = True
         if ((confluence <= -minimum_entry_score and (near_resistance or short_ema_pullback)
                 and not near_support and bearish_confirmation
                 and short_momentum_ok and short_room_ok)
                 or (short_breakdown_retest and short_room_ok)
-                or (short_breakdown_continuation and short_room_ok)):
+                or (short_breakdown_continuation and short_room_ok)
+                or short_opportunity_continuation):
             short_setup_candidate = True
 
-        long_mtf_blocked = long_setup_candidate and long_risk_ok and not mtf_long_ok
-        short_mtf_blocked = short_setup_candidate and short_risk_ok and not mtf_short_ok
-        long_candidate = long_setup_candidate and long_risk_ok and mtf_long_ok
-        short_candidate = short_setup_candidate and short_risk_ok and mtf_short_ok
+        long_mtf_blocked = (
+            long_setup_candidate and long_risk_ok and not mtf_long_entry_ok
+        )
+        short_mtf_blocked = (
+            short_setup_candidate and short_risk_ok and not mtf_short_entry_ok
+        )
+        long_candidate = long_setup_candidate and long_risk_ok and mtf_long_entry_ok
+        short_candidate = short_setup_candidate and short_risk_ok and mtf_short_entry_ok
         if long_candidate and short_candidate:
             long_candidate = False
             short_candidate = False
@@ -1274,10 +1331,22 @@ class Main(MainContext):
             mtf_long_ok and market_trending and ema_up
             and confluence >= minimum_entry_score
             and long_risk_ok and long_room_ok
+        ) or (
+            opportunity_entries and partial_mtf_long_ok
+            and market_trending and ema_up
+            and confluence >= minimum_entry_score
+            and long_momentum_ok and volume_ok
+            and long_risk_ok and long_room_ok
         )
         short_regime_ready = (
             mtf_short_ok and market_trending and not ema_up
             and confluence <= -minimum_entry_score
+            and short_risk_ok and short_room_ok
+        ) or (
+            opportunity_entries and partial_mtf_short_ok
+            and market_trending and not ema_up
+            and confluence <= -minimum_entry_score
+            and short_momentum_ok and volume_ok
             and short_risk_ok and short_room_ok
         )
         long_reverse_candidate = (
@@ -1363,9 +1432,14 @@ class Main(MainContext):
                             self._sim_stop_ref_event_price = self._sim_stop
 
             reverse_confirmed = False
+            reverse_mtf_ok = False
+            if pending_side > 0 and mtf_long_ok:
+                reverse_mtf_ok = True
+            elif pending_side < 0 and mtf_short_ok:
+                reverse_mtf_ok = True
             if (continuous_exposure and self._sim_side != 0
                     and pending_side == -self._sim_side and pending_side != 0
-                    and not self._sim_risk_locked):
+                    and reverse_mtf_ok and not self._sim_risk_locked):
                 if self._sim_reverse_candidate_side == pending_side:
                     self._sim_reverse_confirm_count = (
                         self._sim_reverse_confirm_count + 1
@@ -1386,9 +1460,9 @@ class Main(MainContext):
             entry_stop_distance = nan
             entry_reward_distance = nan
             entry_risk_per_unit = nan
-            if pending_side > 0 and mtf_long_ok:
+            if pending_side > 0 and mtf_long_entry_ok:
                 entry_mtf_ok = True
-            elif pending_side < 0 and mtf_short_ok:
+            elif pending_side < 0 and mtf_short_entry_ok:
                 entry_mtf_ok = True
             if pending_side > 0:
                 if entry_price > pending_stop and entry_price < pending_target:
@@ -1417,7 +1491,7 @@ class Main(MainContext):
 
             allow_entry = self._sim_side == 0
             if (self._sim_side != 0 and reverse_confirmed
-                    and entry_mtf_ok and not self._sim_risk_locked):
+                    and reverse_mtf_ok and not self._sim_risk_locked):
                 reverse_exit_type = 2
                 reverse_exit_price = entry_price
                 if self._sim_side > 0:
@@ -1525,8 +1599,8 @@ class Main(MainContext):
                 self._sim_reverse_confirm_count = 0
                 self._sim_reverse_candidate_side = 0
 
-        # Queue continuous-mode entries from a strong MTF regime and reversals
-        # only from the higher threshold. Legacy setup-only mode remains available.
+        # Queue entries from full-MTF regimes or risk-gated 5m opportunities; reversals
+        # still require full MTF confirmation. Legacy setup-only mode remains available.
         next_pending_side = 0
         next_pending_stop = nan
         next_pending_target = nan
@@ -1679,6 +1753,9 @@ class Main(MainContext):
             if not mtf_ready:
                 mtf_status = 'WARMUP'
                 mtf_text = 'MTF WARMUP 5m/15m/1h/4h'
+                if opportunity_entries and mtf_5m_partial_ready:
+                    mtf_status = 'PARTIAL 5m'
+                    mtf_text = 'MTF PARTIAL 5m; HIGHER TF WARMUP'
             else:
                 mtf_status = 'WAIT'
                 if mtf_long_ok:
@@ -2025,14 +2102,23 @@ class Main(MainContext):
                 chat_answer = 'RISK LOCK: drawdown cap'
             elif not self._mtf_chart_is_1m:
                 chat_answer = 'WAIT: switch to 1m chart'
-            elif not mtf_ready:
-                chat_answer = 'WAIT: MTF warm-up (~84h history)'
+            elif self._sim_side > 0:
+                chat_answer = 'HOLD: long sim position active'
+            elif self._sim_side < 0:
+                chat_answer = 'HOLD: short sim position active'
+            elif self._pending_side > 0:
+                chat_answer = 'BUY queued; next-open risk recheck'
+            elif self._pending_side < 0:
+                chat_answer = 'SELL queued; next-open risk recheck'
             elif self.bar_index < self._sim_cooldown_until_bar:
                 chat_answer = 'WAIT: post-exit cooldown'
-            elif self._sim_side != 0:
-                chat_answer = 'HOLD: need stronger opposite MTF'
-            elif self._pending_side != 0:
-                chat_answer = 'WAIT: next-open risk check'
+            elif not mtf_ready and opportunity_entries:
+                if mtf_5m_partial_ready:
+                    chat_answer = 'WAIT: 5m ready; no local trigger yet'
+                else:
+                    chat_answer = 'WAIT: 5m data still warming'
+            elif not mtf_ready:
+                chat_answer = 'WAIT: full MTF warm-up (~84h history)'
             elif long_setup_candidate and not long_risk_ok:
                 chat_answer = 'WAIT: long risk/RR gate'
             elif short_setup_candidate and not short_risk_ok:
@@ -2040,15 +2126,13 @@ class Main(MainContext):
             elif long_mtf_blocked or short_mtf_blocked:
                 chat_answer = 'WAIT: MTF alignment'
             else:
-                chat_answer = 'WAIT: no safe setup'
+                chat_answer = 'WAIT: no qualifying 1m setup'
 
-        chat_action_text = 'WAIT: no safe setup'
+        chat_action_text = 'WAIT: no qualifying 1m setup'
         if self._sim_risk_locked:
             chat_action_text = 'RISK LOCK'
         elif not self._mtf_chart_is_1m:
             chat_action_text = 'WAIT: use 1m chart'
-        elif not mtf_ready:
-            chat_action_text = 'WAIT: MTF warm-up (~84h)'
         elif self._sim_side > 0:
             chat_action_text = 'HOLD LONG'
             if self._pending_side < 0:
@@ -2067,8 +2151,12 @@ class Main(MainContext):
                 )
         elif self._pending_side > 0:
             chat_action_text = 'BUY NEXT OPEN'
+            if partial_mtf_long_ok:
+                chat_action_text = 'BUY NEXT OPEN | 5m OK'
         elif self._pending_side < 0:
             chat_action_text = 'SELL NEXT OPEN'
+            if partial_mtf_short_ok:
+                chat_action_text = 'SELL NEXT OPEN | 5m OK'
         elif self.bar_index < self._sim_cooldown_until_bar:
             chat_action_text = 'WAIT: cooldown'
         elif long_setup_candidate and not long_risk_ok:
@@ -2076,7 +2164,14 @@ class Main(MainContext):
         elif short_setup_candidate and not short_risk_ok:
             chat_action_text = 'WAIT: short risk/RR gate'
         elif long_mtf_blocked or short_mtf_blocked:
-            chat_action_text = 'WAIT: MTF alignment'
+            chat_action_text = 'WAIT: 5m/higher MTF conflict'
+        elif not mtf_ready and opportunity_entries:
+            if mtf_5m_partial_ready:
+                chat_action_text = 'WAIT: 5m scan; no 1m trigger'
+            else:
+                chat_action_text = 'WAIT: 5m confirmation warming'
+        elif not mtf_ready:
+            chat_action_text = 'WAIT: full MTF warm-up (~84h)'
 
         chat_plot_text = 'TRADE PLOTS: NONE (NO SIM FILL)'
         if self._sim_side > 0:
@@ -2133,6 +2228,8 @@ class Main(MainContext):
         chat_mode_text = 'CONT'
         if not continuous_exposure:
             chat_mode_text = 'SETUP'
+        if opportunity_entries:
+            chat_mode_text = chat_mode_text + '/OPP'
         volatility_text = 'VOL OK'
         if high_volatility:
             volatility_text = 'HIGH VOL'
