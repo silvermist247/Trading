@@ -207,7 +207,7 @@ class Main(MainContext):
             font_size=12,
         )
 
-    def _new_mtf_frame(self, minutes: int) -> dict:
+    def _new_mtf_frame(self, minutes: int) -> dict[str, object]:
         return {
             'minutes': minutes,
             'bucket': -1,
