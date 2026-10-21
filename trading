@@ -2058,10 +2058,9 @@ class Main(MainContext):
         chat_mode_text = 'CONTINUOUS SIM'
         if not continuous_exposure:
             chat_mode_text = 'SETUP-ONLY SIM'
+        volatility_text = 'VOL OK'
         if high_volatility:
             volatility_text = 'HIGH VOL'
-        else:
-            volatility_text = 'VOL OK'
         chat_policy_text = (
             'EXIT ' + active_policy_name + ' | SAMPLES '
             + str(int(context_policy_samples)) + ' | ' + volatility_text
