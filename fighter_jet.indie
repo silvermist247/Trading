@@ -210,18 +210,6 @@ class Main(MainContext):
             RelativePosition(
                 vertical_anchor=va.BOTTOM,
                 horizontal_anchor=ha.LEFT,
-                top_bottom_ratio=0.70,
-                left_right_ratio=0.55,
-            ),
-            bg_color=color.rgba(16, 28, 38, 0.92),
-            text_color=color.rgba(255, 255, 255, 1.0),
-            font_size=12,
-        )
-        self._tick_label = LabelRel(
-            '',
-            RelativePosition(
-                vertical_anchor=va.BOTTOM,
-                horizontal_anchor=ha.LEFT,
                 top_bottom_ratio=0.78,
                 left_right_ratio=0.55,
             ),
@@ -229,9 +217,69 @@ class Main(MainContext):
             text_color=color.rgba(255, 255, 255, 1.0),
             font_size=12,
         )
+        self._tick_buy_count_label = LabelRel(
+            '',
+            RelativePosition(
+                vertical_anchor=va.BOTTOM,
+                horizontal_anchor=ha.LEFT,
+                top_bottom_ratio=0.78,
+                left_right_ratio=0.68,
+            ),
+            bg_color=color.rgba(16, 28, 38, 0.92),
+            text_color=color.rgba(255, 255, 255, 1.0),
+            font_size=12,
+        )
+        self._tick_sell_caption_label = LabelRel(
+            '',
+            RelativePosition(
+                vertical_anchor=va.BOTTOM,
+                horizontal_anchor=ha.LEFT,
+                top_bottom_ratio=0.78,
+                left_right_ratio=0.74,
+            ),
+            bg_color=color.rgba(16, 28, 38, 0.92),
+            text_color=color.rgba(255, 255, 255, 1.0),
+            font_size=12,
+        )
+        self._tick_sell_count_label = LabelRel(
+            '',
+            RelativePosition(
+                vertical_anchor=va.BOTTOM,
+                horizontal_anchor=ha.LEFT,
+                top_bottom_ratio=0.78,
+                left_right_ratio=0.81,
+            ),
+            bg_color=color.rgba(16, 28, 38, 0.92),
+            text_color=color.rgba(255, 255, 255, 1.0),
+            font_size=12,
+        )
+        self._tick_net_caption_label = LabelRel(
+            '',
+            RelativePosition(
+                vertical_anchor=va.BOTTOM,
+                horizontal_anchor=ha.LEFT,
+                top_bottom_ratio=0.78,
+                left_right_ratio=0.87,
+            ),
+            bg_color=color.rgba(16, 28, 38, 0.92),
+            text_color=color.rgba(255, 255, 255, 1.0),
+            font_size=12,
+        )
+        self._tick_net_value_label = LabelRel(
+            '',
+            RelativePosition(
+                vertical_anchor=va.BOTTOM,
+                horizontal_anchor=ha.LEFT,
+                top_bottom_ratio=0.78,
+                left_right_ratio=0.93,
+            ),
+            bg_color=color.rgba(16, 28, 38, 0.92),
+            text_color=color.rgba(255, 255, 255, 1.0),
+            font_size=12,
+        )
 
     def _update_live_tick_counts(self, current_price: float) -> None:
-        # OHLCV price-direction proxies only; this feed has no aggressor-side trade data.
+        # BUY/SELL labels proxy up/down price moves; OHLCV has no aggressor-side data.
         self._tick_flash_side = 0
         if isnan(current_price):
             return
@@ -1426,11 +1474,6 @@ class Main(MainContext):
         tick_net_text = str(tick_net)
         if tick_net > 0:
             tick_net_text = '+' + tick_net_text
-        tick_tracking_text = (
-            'TICKS/BAR | UP ' + str(self._tick_up_count)
-            + ' DOWN ' + str(self._tick_down_count)
-            + ' NET ' + tick_net_text
-        )
 
         why_text = (
             trend_reason + ' ' + bb_reason + ' ' + rsi_reason + ' '
@@ -1442,21 +1485,34 @@ class Main(MainContext):
             + 'WHY: ' + why_text + '\n'
             + plan_text + '\n'
             + sim_pnl_label + '\n'
-            + size_text
+            + size_text + '\n'
+            + 'TICKS/BAR | BUY'
         )
         self._analyst_label.text = analyst_text
-        self._tick_label.text = tick_tracking_text
-        tick_text_color = color.rgba(255, 255, 255, 1.0)
+        # Keep captions white; only the numeric buy/sell counters flash.
+        self._tick_buy_count_label.text = str(self._tick_up_count)
+        self._tick_sell_caption_label.text = ' | SELL'
+        self._tick_sell_count_label.text = str(self._tick_down_count)
+        self._tick_net_caption_label.text = ' | NET'
+        self._tick_net_value_label.text = tick_net_text
+        buy_count_color = color.rgba(255, 255, 255, 1.0)
+        sell_count_color = color.rgba(255, 255, 255, 1.0)
         if self._tick_flash_side > 0:
-            tick_text_color = color.rgba(0, 255, 0, 1.0)
+            buy_count_color = color.rgba(0, 255, 0, 1.0)
         elif self._tick_flash_side < 0:
-            tick_text_color = color.rgba(255, 0, 0, 1.0)
-        self._tick_label.text_color = tick_text_color
+            sell_count_color = color.rgba(255, 0, 0, 1.0)
+        self._tick_buy_count_label.text_color = buy_count_color
+        self._tick_sell_count_label.text_color = sell_count_color
+        self._tick_net_value_label.text_color = color.rgba(255, 255, 255, 1.0)
         self.chart.draw(self._status_label)
         self.chart.draw(self._support_label)
         self.chart.draw(self._resistance_label)
         self.chart.draw(self._analyst_label)
-        self.chart.draw(self._tick_label)
+        self.chart.draw(self._tick_buy_count_label)
+        self.chart.draw(self._tick_sell_caption_label)
+        self.chart.draw(self._tick_sell_count_label)
+        self.chart.draw(self._tick_net_caption_label)
+        self.chart.draw(self._tick_net_value_label)
 
         ema_up_plot = nan
         ema_down_plot = nan
