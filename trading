@@ -222,7 +222,7 @@ class Main(MainContext):
             RelativePosition(
                 vertical_anchor=va.BOTTOM,
                 horizontal_anchor=ha.LEFT,
-                top_bottom_ratio=0.78,
+                top_bottom_ratio=0.87,
                 left_right_ratio=0.68,
             ),
             bg_color=color.rgba(16, 28, 38, 0.92),
@@ -234,7 +234,7 @@ class Main(MainContext):
             RelativePosition(
                 vertical_anchor=va.BOTTOM,
                 horizontal_anchor=ha.LEFT,
-                top_bottom_ratio=0.78,
+                top_bottom_ratio=0.87,
                 left_right_ratio=0.74,
             ),
             bg_color=color.rgba(16, 28, 38, 0.92),
@@ -246,7 +246,7 @@ class Main(MainContext):
             RelativePosition(
                 vertical_anchor=va.BOTTOM,
                 horizontal_anchor=ha.LEFT,
-                top_bottom_ratio=0.78,
+                top_bottom_ratio=0.87,
                 left_right_ratio=0.81,
             ),
             bg_color=color.rgba(16, 28, 38, 0.92),
@@ -258,7 +258,7 @@ class Main(MainContext):
             RelativePosition(
                 vertical_anchor=va.BOTTOM,
                 horizontal_anchor=ha.LEFT,
-                top_bottom_ratio=0.78,
+                top_bottom_ratio=0.87,
                 left_right_ratio=0.87,
             ),
             bg_color=color.rgba(16, 28, 38, 0.92),
@@ -270,7 +270,7 @@ class Main(MainContext):
             RelativePosition(
                 vertical_anchor=va.BOTTOM,
                 horizontal_anchor=ha.LEFT,
-                top_bottom_ratio=0.78,
+                top_bottom_ratio=0.87,
                 left_right_ratio=0.93,
             ),
             bg_color=color.rgba(16, 28, 38, 0.92),
