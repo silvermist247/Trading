@@ -262,6 +262,18 @@ class Main(MainContext):
             text_color=color.rgba(235, 243, 255, 1.0),
             font_size=12,
         )
+        self._progress_label = LabelRel(
+            '',
+            RelativePosition(
+                vertical_anchor=va.TOP,
+                horizontal_anchor=ha.LEFT,
+                top_bottom_ratio=0.08,
+                left_right_ratio=0.02,
+            ),
+            bg_color=color.rgba(12, 20, 31, 0.96),
+            text_color=color.rgba(235, 243, 255, 1.0),
+            font_size=11,
+        )
         self._tick_buy_count_label = LabelRel(
             '',
             RelativePosition(
@@ -2237,6 +2249,123 @@ class Main(MainContext):
             'EXIT ' + active_policy_name + ' | N'
             + str(int(context_policy_samples)) + ' | ' + volatility_text
         )
+
+        entry_progress_pct = 0
+        entry_progress_data = ''
+        entry_progress_detail = chat_action_text
+        if not self._mtf_chart_is_1m:
+            entry_progress_data = '1m chart required'
+            entry_progress_detail = 'WAIT: use 1m chart'
+        elif self._sim_risk_locked:
+            entry_progress_data = 'drawdown lock'
+            entry_progress_detail = 'RISK LOCK'
+        elif self._sim_side != 0:
+            entry_progress_data = 'position open'
+            entry_progress_detail = 'WAIT: exit or full-MTF reversal'
+            if self._pending_side == -self._sim_side:
+                reverse_progress_count = self._sim_reverse_confirm_count
+                if reverse_progress_count < 0:
+                    reverse_progress_count = 0
+                if reverse_progress_count > reverse_confirm_bars:
+                    reverse_progress_count = reverse_confirm_bars
+                entry_progress_pct = int(
+                    reverse_progress_count * 100.0 / reverse_confirm_bars
+                )
+                entry_progress_detail = (
+                    'REVERSAL CONFIRM '
+                    + str(reverse_progress_count) + '/'
+                    + str(reverse_confirm_bars)
+                )
+        elif self._pending_side != 0:
+            entry_progress_pct = 100
+            entry_progress_data = 'risk recheck at next 1m open'
+            if self._pending_side > 0:
+                entry_progress_detail = 'BUY NEXT 1m OPEN'
+            else:
+                entry_progress_detail = 'SELL NEXT 1m OPEN'
+        elif self.bar_index < self._sim_cooldown_until_bar:
+            entry_progress_data = 'post-exit cooldown'
+            entry_progress_detail = 'WAIT: cooldown'
+        else:
+            if opportunity_entries:
+                required_5m_bars = trend_length * 2
+                if required_5m_bars < 1:
+                    required_5m_bars = 1
+                closed_5m_bars = int(mtf_5m['closed_count'])
+                if closed_5m_bars < 0:
+                    closed_5m_bars = 0
+                if closed_5m_bars > required_5m_bars:
+                    closed_5m_bars = required_5m_bars
+                entry_progress_pct = int(
+                    closed_5m_bars * 40.0 / required_5m_bars
+                )
+                entry_progress_data = (
+                    '5m DATA ' + str(closed_5m_bars)
+                    + '/' + str(required_5m_bars)
+                )
+                if mtf_ready:
+                    entry_progress_pct = 40
+                    entry_progress_data = 'MTF DATA 4/4'
+                elif mtf_5m_partial_ready:
+                    entry_progress_pct = 40
+            else:
+                ready_frame_count = 0
+                for mtf_frame in self._mtf_frames:
+                    if mtf_frame['ready']:
+                        ready_frame_count = ready_frame_count + 1
+                entry_progress_pct = ready_frame_count * 10
+                entry_progress_data = (
+                    'MTF DATA ' + str(ready_frame_count) + '/4'
+                )
+
+            if mtf_ready or mtf_5m_partial_ready:
+                local_long_read = (
+                    market_trending and ema_up
+                    and confluence >= minimum_entry_score
+                )
+                local_short_read = (
+                    market_trending and not ema_up
+                    and confluence <= -minimum_entry_score
+                )
+                if market_trending:
+                    entry_progress_pct = entry_progress_pct + 10
+                if local_long_read or local_short_read:
+                    entry_progress_pct = entry_progress_pct + 15
+                if ((local_long_read and long_momentum_ok)
+                        or (local_short_read and short_momentum_ok)):
+                    entry_progress_pct = entry_progress_pct + 10
+                if volume_ok:
+                    entry_progress_pct = entry_progress_pct + 5
+                if ((local_long_read and mtf_long_entry_ok)
+                        or (local_short_read and mtf_short_entry_ok)):
+                    entry_progress_pct = entry_progress_pct + 10
+                if ((local_long_read and long_risk_ok and long_room_ok)
+                        or (local_short_read and short_risk_ok and short_room_ok)):
+                    entry_progress_pct = entry_progress_pct + 10
+                if (long_candidate or short_candidate
+                        or long_regime_ready or short_regime_ready):
+                    entry_progress_pct = 90
+            if entry_progress_pct > 90:
+                entry_progress_pct = 90
+            entry_progress_detail = chat_action_text
+
+        progress_fill_count = int(entry_progress_pct / 10)
+        if progress_fill_count > 10:
+            progress_fill_count = 10
+        progress_bar_text = '['
+        for progress_bar_index in range(10):
+            if progress_bar_index < progress_fill_count:
+                progress_bar_text = progress_bar_text + '#'
+            else:
+                progress_bar_text = progress_bar_text + '-'
+        progress_bar_text = progress_bar_text + ']'
+        self._progress_label.text = (
+            'NEXT SIM ORDER | READINESS '
+            + str(entry_progress_pct) + '%\n'
+            + progress_bar_text + ' ' + entry_progress_data + '\n'
+            + entry_progress_detail
+        )
+
         self._chat_label.text = (
             'JET CHAT | RULE-BASED\n'
             + 'Q: ' + chart_chat_question + '\n'
@@ -2270,6 +2399,7 @@ class Main(MainContext):
         self.chart.draw(self._resistance_label)
         self.chart.draw(self._analyst_label)
         self.chart.draw(self._chat_label)
+        self.chart.draw(self._progress_label)
         self.chart.draw(self._tick_buy_count_label)
         self.chart.draw(self._tick_sell_caption_label)
         self.chart.draw(self._tick_sell_count_label)
