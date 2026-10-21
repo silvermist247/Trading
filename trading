@@ -69,61 +69,61 @@ from indie.drawings import (
 @plot.line(id='bb_lower', title='Bollinger lower band', color=color.rgba(50, 170, 255, 0.8), line_width=1)
 @plot.line(id='bb_upper', title='Bollinger upper band', color=color.rgba(50, 170, 255, 0.8), line_width=1)
 @plot.marker(
-    title='Simulated BUY entry',
+    title='Simulated BUY entry bubble',
     color=color.rgba(0, 255, 0, 1.0),
     style=plot.marker_style.CIRCLE,
     position=plot.marker_position.CENTER,
-    size=3,
+    size=6,
     display_options=plot.MarkerDisplayOptions(
         pane=True, status_line=False, price_label=False,
     ),
 )
 @plot.marker(
-    title='Simulated SELL entry',
+    title='Simulated SELL entry bubble',
     color=color.rgba(255, 0, 0, 1.0),
     style=plot.marker_style.CIRCLE,
     position=plot.marker_position.CENTER,
-    size=3,
+    size=6,
     display_options=plot.MarkerDisplayOptions(
         pane=True, status_line=False, price_label=False,
     ),
 )
 @plot.marker(
-    title='Simulated take-profit level',
+    title='Active simulated TP target',
     color=color.rgba(255, 165, 0, 1.0),
     style=plot.marker_style.CIRCLE,
     position=plot.marker_position.CENTER,
-    size=1,
+    size=2,
     display_options=plot.MarkerDisplayOptions(
         pane=True, status_line=False, price_label=False,
     ),
 )
 @plot.marker(
-    title='Simulated stop-loss level',
+    title='Active simulated SL stop',
     color=color.rgba(255, 220, 0, 1.0),
     style=plot.marker_style.CIRCLE,
     position=plot.marker_position.CENTER,
-    size=1,
+    size=2,
     display_options=plot.MarkerDisplayOptions(
         pane=True, status_line=False, price_label=False,
     ),
 )
 @plot.marker(
     title='Simulated take-profit fill',
-    color=color.rgba(255, 165, 0, 1.0),
+    color=color.rgba(0, 255, 0, 1.0),
     style=plot.marker_style.CIRCLE,
     position=plot.marker_position.CENTER,
-    size=3,
+    size=6,
     display_options=plot.MarkerDisplayOptions(
         pane=True, status_line=False, price_label=False,
     ),
 )
 @plot.marker(
     title='Simulated stop-loss fill',
-    color=color.rgba(255, 0, 180, 1.0),
+    color=color.rgba(255, 0, 0, 1.0),
     style=plot.marker_style.CIRCLE,
     position=plot.marker_position.CENTER,
-    size=3,
+    size=6,
     display_options=plot.MarkerDisplayOptions(
         pane=True, status_line=False, price_label=False,
     ),
@@ -260,13 +260,13 @@ class Main(MainContext):
             '',
             RelativePosition(
                 vertical_anchor=va.TOP,
-                horizontal_anchor=ha.RIGHT,
+                horizontal_anchor=ha.LEFT,
                 top_bottom_ratio=0.02,
-                left_right_ratio=0.98,
+                left_right_ratio=0.56,
             ),
             bg_color=color.rgba(12, 20, 31, 0.96),
             text_color=color.rgba(235, 243, 255, 1.0),
-            font_size=11,
+            font_size=10,
         )
         self._tick_buy_count_label = LabelRel(
             '',
@@ -1596,10 +1596,17 @@ class Main(MainContext):
                 buy_entry_marker = self._sim_entry_event_price
             else:
                 sell_entry_marker = self._sim_entry_event_price
-        if self._sim_stop_ref_event_bar == self.bar_index:
-            stop_reference_marker = self._sim_stop_ref_event_price
-        if self._sim_tp_ref_event_bar == self.bar_index:
-            tp_reference_marker = self._sim_tp_ref_event_price
+        if self._sim_side != 0:
+            stop_reference_marker = self._sim_stop
+            tp_reference_marker = self._sim_target
+        elif self._pending_side != 0:
+            stop_reference_marker = self._pending_stop
+            tp_reference_marker = self._pending_target
+        else:
+            if self._sim_stop_ref_event_bar == self.bar_index:
+                stop_reference_marker = self._sim_stop_ref_event_price
+            if self._sim_tp_ref_event_bar == self.bar_index:
+                tp_reference_marker = self._sim_tp_ref_event_price
         if self._sim_exit_event_bar == self.bar_index:
             if self._sim_exit_event_type == 1:
                 tp_exit_marker = self._sim_exit_event_price
@@ -1978,29 +1985,27 @@ class Main(MainContext):
         chat_answer = market_text + ' | ' + mtf_status + ' | SCORE ' + confluence_text
         if chart_chat_question == 'Why holding?':
             if self._sim_side > 0:
-                chat_answer = 'Hold LONG; opposite confirmation '
+                chat_answer = 'Hold LONG'
                 if self._pending_side < 0:
                     chat_answer = (
-                        chat_answer + str(self._sim_reverse_confirm_count)
+                        'Hold LONG; REV '
+                        + str(self._sim_reverse_confirm_count)
                         + '/' + str(reverse_confirm_bars)
                     )
-                else:
-                    chat_answer = chat_answer + 'not qualified yet'
             elif self._sim_side < 0:
-                chat_answer = 'Hold SHORT; opposite confirmation '
+                chat_answer = 'Hold SHORT'
                 if self._pending_side > 0:
                     chat_answer = (
-                        chat_answer + str(self._sim_reverse_confirm_count)
+                        'Hold SHORT; REV '
+                        + str(self._sim_reverse_confirm_count)
                         + '/' + str(reverse_confirm_bars)
                     )
-                else:
-                    chat_answer = chat_answer + 'not qualified yet'
             elif self._pending_side > 0:
-                chat_answer = 'LONG queued; rechecked at next open'
+                chat_answer = 'LONG queued; next-open check'
             elif self._pending_side < 0:
-                chat_answer = 'SHORT queued; rechecked at next open'
+                chat_answer = 'SHORT queued; next-open check'
             else:
-                chat_answer = 'No open position; waiting for a safe regime'
+                chat_answer = 'Flat; waiting for safe regime'
         elif chart_chat_question == 'Risk / levels':
             if self._sim_side > 0:
                 chat_answer = (
@@ -2014,65 +2019,102 @@ class Main(MainContext):
                 )
             elif self._pending_side > 0:
                 chat_answer = (
-                    'LONG plan SL ' + str(round(self._pending_stop, price_precision))
+                    'LONG SL ' + str(round(self._pending_stop, price_precision))
                     + ' TP ' + str(round(self._pending_target, price_precision))
                 )
             elif self._pending_side < 0:
                 chat_answer = (
-                    'SHORT plan SL ' + str(round(self._pending_stop, price_precision))
+                    'SHORT SL ' + str(round(self._pending_stop, price_precision))
                     + ' TP ' + str(round(self._pending_target, price_precision))
                 )
             else:
-                chat_answer = 'No valid stop/target plan right now'
+                chat_answer = 'No safe SL/TP plan'
         elif chart_chat_question == 'Why waiting?':
             if self._sim_risk_locked:
-                chat_answer = 'LOCKED: realized drawdown cap reached'
+                chat_answer = 'RISK LOCK: drawdown cap'
             elif not self._mtf_chart_is_1m:
-                chat_answer = 'Use 1m chart; MTF signals are disabled here'
+                chat_answer = 'WAIT: switch to 1m chart'
             elif not mtf_ready:
-                chat_answer = 'Building completed 5m/15m/1h/4h context'
+                chat_answer = 'WAIT: MTF warm-up (~84h history)'
             elif self.bar_index < self._sim_cooldown_until_bar:
-                chat_answer = 'Post-exit cooldown; safety gate is active'
+                chat_answer = 'WAIT: post-exit cooldown'
             elif self._sim_side != 0:
-                chat_answer = 'Holding; reversal needs stronger opposite MTF'
+                chat_answer = 'HOLD: need stronger opposite MTF'
             elif self._pending_side != 0:
-                chat_answer = 'Queued for next open; gap/risk checks remain'
+                chat_answer = 'WAIT: next-open risk check'
             elif long_setup_candidate and not long_risk_ok:
-                chat_answer = 'LONG blocked by stop distance or net R/R'
+                chat_answer = 'WAIT: long risk/RR gate'
             elif short_setup_candidate and not short_risk_ok:
-                chat_answer = 'SHORT blocked by stop distance or net R/R'
+                chat_answer = 'WAIT: short risk/RR gate'
             elif long_mtf_blocked or short_mtf_blocked:
-                chat_answer = 'Waiting for completed higher-timeframe alignment'
+                chat_answer = 'WAIT: MTF alignment'
             else:
-                chat_answer = scenario_text
+                chat_answer = 'WAIT: no safe setup'
 
-        chat_risk_text = 'EQ UNSET: 1 unit; % risk cap unavailable'
+        chat_action_text = 'WAIT: no safe setup'
+        if self._sim_risk_locked:
+            chat_action_text = 'RISK LOCK'
+        elif not self._mtf_chart_is_1m:
+            chat_action_text = 'WAIT: use 1m chart'
+        elif not mtf_ready:
+            chat_action_text = 'WAIT: MTF warm-up (~84h)'
+        elif self._sim_side > 0:
+            chat_action_text = 'HOLD LONG'
+            if self._pending_side < 0:
+                chat_action_text = (
+                    'HOLD LONG; REV '
+                    + str(self._sim_reverse_confirm_count)
+                    + '/' + str(reverse_confirm_bars)
+                )
+        elif self._sim_side < 0:
+            chat_action_text = 'HOLD SHORT'
+            if self._pending_side > 0:
+                chat_action_text = (
+                    'HOLD SHORT; REV '
+                    + str(self._sim_reverse_confirm_count)
+                    + '/' + str(reverse_confirm_bars)
+                )
+        elif self._pending_side > 0:
+            chat_action_text = 'BUY NEXT OPEN'
+        elif self._pending_side < 0:
+            chat_action_text = 'SELL NEXT OPEN'
+        elif self.bar_index < self._sim_cooldown_until_bar:
+            chat_action_text = 'WAIT: cooldown'
+        elif long_setup_candidate and not long_risk_ok:
+            chat_action_text = 'WAIT: long risk/RR gate'
+        elif short_setup_candidate and not short_risk_ok:
+            chat_action_text = 'WAIT: short risk/RR gate'
+        elif long_mtf_blocked or short_mtf_blocked:
+            chat_action_text = 'WAIT: MTF alignment'
+
+        chat_risk_text = 'RISK: EQ UNSET | 1 UNIT'
         if equity_configured:
             chat_risk_text = (
-                'DD ' + str(round(self._sim_drawdown_pct, 2)) + '/'
-                + str(round(max_drawdown_pct, 1)) + '% | RISK '
+                'RISK: DD ' + str(round(self._sim_drawdown_pct, 1)) + '/'
+                + str(round(max_drawdown_pct, 1)) + '% | '
                 + str(round(risk_per_trade_pct, 2)) + '%'
             )
         if self._sim_risk_locked:
-            chat_risk_text = 'RISK LOCK | DD ' + str(round(self._sim_drawdown_pct, 2)) + '%'
-        chat_mode_text = 'CONTINUOUS SIM'
+            chat_risk_text = 'RISK: LOCK | DD ' + str(round(self._sim_drawdown_pct, 1)) + '%'
+        chat_mode_text = 'CONT'
         if not continuous_exposure:
-            chat_mode_text = 'SETUP-ONLY SIM'
+            chat_mode_text = 'SETUP'
         volatility_text = 'VOL OK'
         if high_volatility:
             volatility_text = 'HIGH VOL'
         chat_policy_text = (
-            'EXIT ' + active_policy_name + ' | SAMPLES '
+            'EXIT ' + active_policy_name + ' | N'
             + str(int(context_policy_samples)) + ' | ' + volatility_text
         )
         self._chat_label.text = (
             'JET CHAT | RULE-BASED\n'
             + 'Q: ' + chart_chat_question + '\n'
-            + 'A: ' + chat_answer + '\n'
-            + 'SIM: ' + sim_state_text + ' | ' + chat_mode_text + '\n'
+            + 'READ: ' + chat_answer + '\n'
+            + 'ACTION: ' + chat_action_text + '\n'
+            + 'POS: ' + sim_state_text + ' | ' + chat_mode_text + '\n'
             + chat_policy_text + '\n'
             + chat_risk_text + '\n'
-            + 'PAPER ONLY - NO LIVE ORDERS'
+            + 'NO LIVE ORDERS'
         )
         self._chat_label.text_color = color.rgba(235, 243, 255, 1.0)
 
