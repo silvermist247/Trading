@@ -1,0 +1,1413 @@
+# indie:lang_version = 5
+from math import isnan, nan
+from indie import MainContext, color, indicator, param, plot
+from indie.algorithms import Atr, Bb, Ema, Highest, Lowest, Rsi, Sma
+from indie.drawings import (
+    AbsolutePosition,
+    LabelRel,
+    LineSegment,
+    RelativePosition,
+    horizontal_anchor as ha,
+    vertical_anchor as va,
+)
+
+
+# Rule-based OHLCV paper simulator; it is not a learning model or order system.
+# Run on a 1-minute chart: closed 1m candles are aggregated into 5m, 15m, 1h, and 4h bars.
+# Other chart intervals show an MTF warning and block new entries; default warmup is about 84 hours.
+# MTF scores use only completed higher-timeframe bars to avoid using unfinished candles.
+# Higher-timeframe volume is the chart's volume field (possibly tick volume), not trader counts.
+# Signals are queued at candle close and simulated at the next candle open. Stop/TP hits
+# use candle ranges; if both are touched in one bar, the simulator assumes the stop hit first.
+# Equity is optional: without it, trades use one simulated unit. No live orders are placed.
+# Costs are estimates; actual fees, slippage, funding, contract units, and liquidation differ.
+@indicator('Fighter-Jet Radar - Paper Trade Simulator', overlay_main_pane=True)
+@param.int('trend_length', default=9, min=1, max=250, title='Trend EMA base length')
+@param.int('radar_length', default=14, min=1, max=250, title='ATR length')
+@param.int('volume_sma', default=20, min=1, max=500, title='Volume baseline lookback (bars)')
+@param.int('level_lookback', default=10, min=2, max=500, title='Support / resistance lookback (bars)')
+@param.int('band_length', default=20, min=2, max=250, title='Bollinger length')
+@param.float('band_multiplier', default=2.0, min=0.5, max=4.0, step=0.1, title='Bollinger deviation')
+@param.int('rsi_length', default=14, min=2, max=250, title='RSI length')
+@param.float('tp_atr_multiple', default=1.5, min=0.5, max=4.0, step=0.1, title='TP reference (ATR multiple)')
+@param.float('stop_buffer_atr', default=0.2, min=0.05, max=1.0, step=0.05, title='Structural stop buffer (ATR)')
+@param.float('max_stop_atr', default=2.0, min=0.5, max=5.0, step=0.1, title='Maximum initial stop distance (ATR)')
+@param.float('min_reward_risk', default=1.5, min=0.5, max=4.0, step=0.1, title='Minimum estimated net reward/risk')
+@param.float('pullback_tolerance_atr', default=0.4, min=0.05, max=1.0, step=0.05, title='EMA pullback tolerance (ATR)')
+@param.int('minimum_entry_score', default=3, min=2, max=5, title='Minimum entry score (lower = more signals)')
+@param.float('risk_per_trade_pct', default=0.25, min=0.05, max=1.0, step=0.05, title='Risk budget (% of equity)')
+@param.float('round_trip_cost_pct', default=0.0, min=0.0, max=2.0, step=0.05, title='Estimated round-trip costs (% notional; set broker estimate)')
+@param.float('account_equity_quote', default=0.0, min=0.0, max=1000000000.0, step=1.0, title='Optional equity in chart quote currency (0 simulates 1 unit)')
+@plot.line(
+    id='ema_up', title='EMA uptrend',
+    color=color.rgba(0, 255, 0, 1.0), line_width=2,
+)
+@plot.line(
+    id='ema_down', title='EMA downtrend',
+    color=color.rgba(255, 0, 255, 1.0), line_width=2,
+)
+@plot.steps(
+    id='support_level', title='10-bar support',
+    color=color.rgba(0, 180, 0, 0.85), line_width=1,
+)
+@plot.steps(
+    id='resistance_level', title='10-bar resistance',
+    color=color.rgba(255, 0, 180, 0.85), line_width=1,
+)
+@plot.line(id='bb_lower', title='Bollinger lower band', color=color.rgba(50, 170, 255, 0.8), line_width=1)
+@plot.line(id='bb_upper', title='Bollinger upper band', color=color.rgba(50, 170, 255, 0.8), line_width=1)
+@plot.marker(
+    title='Simulated BUY entry',
+    color=color.rgba(0, 255, 0, 1.0),
+    style=plot.marker_style.CIRCLE,
+    position=plot.marker_position.CENTER,
+    size=3,
+    display_options=plot.MarkerDisplayOptions(
+        pane=True, status_line=False, price_label=False,
+    ),
+)
+@plot.marker(
+    title='Simulated SELL entry',
+    color=color.rgba(255, 0, 0, 1.0),
+    style=plot.marker_style.CIRCLE,
+    position=plot.marker_position.CENTER,
+    size=3,
+    display_options=plot.MarkerDisplayOptions(
+        pane=True, status_line=False, price_label=False,
+    ),
+)
+@plot.marker(
+    title='Simulated take-profit level',
+    color=color.rgba(255, 165, 0, 1.0),
+    style=plot.marker_style.CIRCLE,
+    position=plot.marker_position.CENTER,
+    size=1,
+    display_options=plot.MarkerDisplayOptions(
+        pane=True, status_line=False, price_label=False,
+    ),
+)
+@plot.marker(
+    title='Simulated stop-loss level',
+    color=color.rgba(255, 220, 0, 1.0),
+    style=plot.marker_style.CIRCLE,
+    position=plot.marker_position.CENTER,
+    size=1,
+    display_options=plot.MarkerDisplayOptions(
+        pane=True, status_line=False, price_label=False,
+    ),
+)
+@plot.marker(
+    title='Simulated take-profit fill',
+    color=color.rgba(255, 165, 0, 1.0),
+    style=plot.marker_style.CIRCLE,
+    position=plot.marker_position.CENTER,
+    size=3,
+    display_options=plot.MarkerDisplayOptions(
+        pane=True, status_line=False, price_label=False,
+    ),
+)
+@plot.marker(
+    title='Simulated stop-loss fill',
+    color=color.rgba(255, 0, 180, 1.0),
+    style=plot.marker_style.CIRCLE,
+    position=plot.marker_position.CENTER,
+    size=3,
+    display_options=plot.MarkerDisplayOptions(
+        pane=True, status_line=False, price_label=False,
+    ),
+)
+class Main(MainContext):
+    def __init__(self):
+        self._last_live_price = nan
+        self._has_live_baseline = False
+        self._sim_bar_index = -1
+        self._mtf_time_scale = 0
+        self._mtf_chart_is_1m = False
+        self._mtf_trend_length = -1
+        self._mtf_radar_length = -1
+        self._mtf_volume_sma = -1
+        self._mtf_band_length = -1
+        self._mtf_rsi_length = -1
+        self._mtf_frames = [
+            self._new_mtf_frame(5),
+            self._new_mtf_frame(15),
+            self._new_mtf_frame(60),
+            self._new_mtf_frame(240),
+        ]
+        self._pending_side = 0
+        self._pending_stop = nan
+        self._pending_target = nan
+        self._pending_max_stop_distance = nan
+        self._sim_side = 0
+        self._sim_entry_price = nan
+        self._sim_entry_time = nan
+        self._sim_stop = nan
+        self._sim_target = nan
+        self._sim_units = 0.0
+        self._sim_entry_event_bar = -1
+        self._sim_entry_event_side = 0
+        self._sim_entry_event_price = nan
+        self._sim_stop_ref_event_bar = -1
+        self._sim_stop_ref_event_price = nan
+        self._sim_tp_ref_event_bar = -1
+        self._sim_tp_ref_event_price = nan
+        self._sim_exit_event_bar = -1
+        self._sim_exit_event_type = 0
+        self._sim_exit_event_price = nan
+        self._sim_trade_count = 0
+        self._sim_tp_count = 0
+        self._sim_stop_count = 0
+        self._sim_realized_pnl = 0.0
+        self._status_label = LabelRel(
+            '',
+            RelativePosition(
+                vertical_anchor=va.BOTTOM,
+                horizontal_anchor=ha.LEFT,
+                top_bottom_ratio=0.78,
+                left_right_ratio=0.02,
+            ),
+            bg_color=color.rgba(16, 28, 38, 0.92),
+            text_color=color.rgba(255, 255, 255, 1.0),
+            font_size=11,
+        )
+        self._support_label = LabelRel(
+            '',
+            RelativePosition(
+                vertical_anchor=va.BOTTOM,
+                horizontal_anchor=ha.LEFT,
+                top_bottom_ratio=0.92,
+                left_right_ratio=0.02,
+            ),
+            bg_color=color.rgba(16, 28, 38, 0.92),
+            text_color=color.rgba(0, 180, 0, 1.0),
+            font_size=12,
+        )
+        self._resistance_label = LabelRel(
+            '',
+            RelativePosition(
+                vertical_anchor=va.BOTTOM,
+                horizontal_anchor=ha.LEFT,
+                top_bottom_ratio=0.92,
+                left_right_ratio=0.45,
+            ),
+            bg_color=color.rgba(16, 28, 38, 0.92),
+            text_color=color.rgba(255, 0, 180, 1.0),
+            font_size=12,
+        )
+        self._analyst_label = LabelRel(
+            '',
+            RelativePosition(
+                vertical_anchor=va.BOTTOM,
+                horizontal_anchor=ha.LEFT,
+                top_bottom_ratio=0.78,
+                left_right_ratio=0.55,
+            ),
+            bg_color=color.rgba(16, 28, 38, 0.92),
+            text_color=color.rgba(255, 255, 255, 1.0),
+            font_size=12,
+        )
+
+    def _new_mtf_frame(self, minutes: int) -> dict:
+        return {
+            'minutes': minutes,
+            'bucket': -1,
+            'has_aggregate': False,
+            'finalized': False,
+            'aggregate_open': nan,
+            'aggregate_high': nan,
+            'aggregate_low': nan,
+            'aggregate_close': nan,
+            'aggregate_volume': 0.0,
+            'aggregate_count': 0,
+            'closed_count': 0,
+            'fast_seed_sum': 0.0,
+            'slow_seed_sum': 0.0,
+            'fast_ema': nan,
+            'slow_ema': nan,
+            'atr_seed_sum': 0.0,
+            'atr_count': 0,
+            'atr_value': nan,
+            'previous_close': nan,
+            'rsi_gain_sum': 0.0,
+            'rsi_loss_sum': 0.0,
+            'rsi_count': 0,
+            'average_gain': nan,
+            'average_loss': nan,
+            'rsi_value': nan,
+            'close_history': [],
+            'volume_history': [],
+            'bb_middle': nan,
+            'volume_ok': False,
+            'trend': 0,
+            'score': 0,
+            'ready': False,
+        }
+
+    def _start_mtf_aggregate(self, frame_index: int, bucket: int,
+                             open_value: float, high_value: float,
+                             low_value: float, close_value: float,
+                             volume_value: float) -> None:
+        frame = self._mtf_frames[frame_index]
+        frame['bucket'] = bucket
+        frame['has_aggregate'] = True
+        frame['finalized'] = False
+        frame['aggregate_open'] = open_value
+        frame['aggregate_high'] = high_value
+        frame['aggregate_low'] = low_value
+        frame['aggregate_close'] = close_value
+        frame['aggregate_volume'] = volume_value
+        frame['aggregate_count'] = 1
+
+    def _complete_mtf_aggregate(self, frame_index: int,
+                                trend_length: int, radar_length: int,
+                                volume_sma: int, band_length: int,
+                                rsi_length: int) -> None:
+        frame = self._mtf_frames[frame_index]
+        close_value = frame['aggregate_close']
+        high_value = frame['aggregate_high']
+        low_value = frame['aggregate_low']
+        volume_value = frame['aggregate_volume']
+        previous_close = frame['previous_close']
+        completed_count = frame['closed_count'] + 1
+        slow_length = trend_length * 2
+
+        if completed_count <= trend_length:
+            frame['fast_seed_sum'] = frame['fast_seed_sum'] + close_value
+            if completed_count == trend_length:
+                frame['fast_ema'] = frame['fast_seed_sum'] / trend_length
+        else:
+            alpha_fast = 2.0 / (trend_length + 1.0)
+            frame['fast_ema'] = (
+                alpha_fast * close_value
+                + (1.0 - alpha_fast) * frame['fast_ema']
+            )
+
+        if completed_count <= slow_length:
+            frame['slow_seed_sum'] = frame['slow_seed_sum'] + close_value
+            if completed_count == slow_length:
+                frame['slow_ema'] = frame['slow_seed_sum'] / slow_length
+        else:
+            alpha_slow = 2.0 / (slow_length + 1.0)
+            frame['slow_ema'] = (
+                alpha_slow * close_value
+                + (1.0 - alpha_slow) * frame['slow_ema']
+            )
+
+        true_range = high_value - low_value
+        if not isnan(previous_close):
+            high_gap = abs(high_value - previous_close)
+            low_gap = abs(low_value - previous_close)
+            if high_gap > true_range:
+                true_range = high_gap
+            if low_gap > true_range:
+                true_range = low_gap
+
+        atr_count = frame['atr_count'] + 1
+        if atr_count <= radar_length:
+            frame['atr_seed_sum'] = frame['atr_seed_sum'] + true_range
+            if atr_count == radar_length:
+                frame['atr_value'] = frame['atr_seed_sum'] / radar_length
+        else:
+            frame['atr_value'] = (
+                frame['atr_value'] * (radar_length - 1.0) + true_range
+            ) / radar_length
+        frame['atr_count'] = atr_count
+
+        if not isnan(previous_close):
+            change = close_value - previous_close
+            gain = 0.0
+            loss = 0.0
+            if change > 0:
+                gain = change
+            elif change < 0:
+                loss = -change
+
+            if frame['rsi_count'] < rsi_length:
+                frame['rsi_gain_sum'] = frame['rsi_gain_sum'] + gain
+                frame['rsi_loss_sum'] = frame['rsi_loss_sum'] + loss
+                frame['rsi_count'] = frame['rsi_count'] + 1
+                if frame['rsi_count'] == rsi_length:
+                    frame['average_gain'] = frame['rsi_gain_sum'] / rsi_length
+                    frame['average_loss'] = frame['rsi_loss_sum'] / rsi_length
+            else:
+                frame['average_gain'] = (
+                    frame['average_gain'] * (rsi_length - 1.0) + gain
+                ) / rsi_length
+                frame['average_loss'] = (
+                    frame['average_loss'] * (rsi_length - 1.0) + loss
+                ) / rsi_length
+
+            if frame['rsi_count'] >= rsi_length:
+                if frame['average_loss'] == 0:
+                    frame['rsi_value'] = 100.0
+                else:
+                    relative_strength = frame['average_gain'] / frame['average_loss']
+                    frame['rsi_value'] = 100.0 - 100.0 / (1.0 + relative_strength)
+
+        volume_average = nan
+        if len(frame['volume_history']) >= volume_sma:
+            volume_total = 0.0
+            for old_volume in frame['volume_history']:
+                volume_total = volume_total + old_volume
+            volume_average = volume_total / volume_sma
+        frame['volume_ok'] = (
+            not isnan(volume_average) and volume_value > volume_average
+        )
+        frame['volume_history'].append(volume_value)
+        if len(frame['volume_history']) > volume_sma:
+            frame['volume_history'].pop(0)
+
+        frame['close_history'].append(close_value)
+        if len(frame['close_history']) > band_length:
+            frame['close_history'].pop(0)
+        frame['bb_middle'] = nan
+        if len(frame['close_history']) == band_length:
+            close_total = 0.0
+            for old_close in frame['close_history']:
+                close_total = close_total + old_close
+            frame['bb_middle'] = close_total / band_length
+
+        trend = 0
+        if (not isnan(frame['atr_value'])
+                and not isnan(frame['fast_ema'])
+                and not isnan(frame['slow_ema'])
+                and frame['atr_value'] > 0):
+            ema_spread = abs(frame['fast_ema'] - frame['slow_ema'])
+            if ema_spread >= frame['atr_value'] * 0.1:
+                if frame['fast_ema'] > frame['slow_ema']:
+                    trend = 1
+                else:
+                    trend = -1
+
+        score = 0
+        if trend != 0:
+            score = score + trend * 2
+        if not isnan(frame['bb_middle']):
+            if close_value > frame['bb_middle']:
+                score = score + 1
+            elif close_value < frame['bb_middle']:
+                score = score - 1
+        if not isnan(frame['rsi_value']):
+            if frame['rsi_value'] >= 55.0:
+                score = score + 1
+            elif frame['rsi_value'] <= 45.0:
+                score = score - 1
+        bar_range = high_value - low_value
+        candle_body = abs(close_value - frame['aggregate_open'])
+        if bar_range > 0:
+            if (close_value > frame['aggregate_open']
+                    and candle_body >= bar_range * 0.3
+                    and close_value >= low_value + bar_range * 0.65):
+                score = score + 1
+            elif (close_value < frame['aggregate_open']
+                    and candle_body >= bar_range * 0.3
+                    and close_value <= low_value + bar_range * 0.35):
+                score = score - 1
+        if trend != 0 and frame['volume_ok']:
+            score = score + trend
+
+        warmup_count = slow_length
+        if radar_length > warmup_count:
+            warmup_count = radar_length
+        if rsi_length + 1 > warmup_count:
+            warmup_count = rsi_length + 1
+        if band_length > warmup_count:
+            warmup_count = band_length
+        if volume_sma + 1 > warmup_count:
+            warmup_count = volume_sma + 1
+
+        frame['closed_count'] = completed_count
+        frame['previous_close'] = close_value
+        frame['trend'] = trend
+        frame['score'] = score
+        frame['ready'] = (
+            completed_count >= warmup_count
+            and not isnan(frame['fast_ema'])
+            and not isnan(frame['slow_ema'])
+            and not isnan(frame['atr_value'])
+            and not isnan(frame['rsi_value'])
+            and not isnan(frame['bb_middle'])
+            and len(frame['volume_history']) >= volume_sma
+        )
+
+    def _update_multi_timeframe(self, current_time: float,
+                                previous_time: float,
+                                open_value: float, high_value: float,
+                                low_value: float, close_value: float,
+                                volume_value: float, trend_length: int,
+                                radar_length: int, volume_sma: int,
+                                band_length: int, rsi_length: int) -> None:
+        if isnan(current_time) or isnan(previous_time):
+            return
+        time_delta = abs(current_time - previous_time)
+        if time_delta >= 50.0 and time_delta <= 70.0:
+            self._mtf_time_scale = 1
+            self._mtf_chart_is_1m = True
+        elif time_delta >= 50000.0 and time_delta <= 70000.0:
+            self._mtf_time_scale = 1000
+            self._mtf_chart_is_1m = True
+        if not self._mtf_chart_is_1m:
+            return
+
+        frame_index = 0
+        for frame in self._mtf_frames:
+            interval = frame['minutes'] * 60 * self._mtf_time_scale
+            source_bucket = int(previous_time / interval)
+            if not frame['has_aggregate']:
+                self._start_mtf_aggregate(
+                    frame_index, source_bucket, open_value, high_value,
+                    low_value, close_value, volume_value,
+                )
+            elif source_bucket != frame['bucket']:
+                if not frame['finalized']:
+                    self._complete_mtf_aggregate(
+                        frame_index, trend_length, radar_length, volume_sma,
+                        band_length, rsi_length,
+                    )
+                self._start_mtf_aggregate(
+                    frame_index, source_bucket, open_value, high_value,
+                    low_value, close_value, volume_value,
+                )
+            else:
+                if high_value > frame['aggregate_high']:
+                    frame['aggregate_high'] = high_value
+                if low_value < frame['aggregate_low']:
+                    frame['aggregate_low'] = low_value
+                frame['aggregate_close'] = close_value
+                frame['aggregate_volume'] = frame['aggregate_volume'] + volume_value
+                frame['aggregate_count'] = frame['aggregate_count'] + 1
+
+            current_bucket = int(current_time / interval)
+            if (current_bucket != frame['bucket']
+                    and not frame['finalized']):
+                self._complete_mtf_aggregate(
+                    frame_index, trend_length, radar_length, volume_sma,
+                    band_length, rsi_length,
+                )
+                frame['finalized'] = True
+            frame_index = frame_index + 1
+
+    def calc(
+        self,
+        trend_length,
+        radar_length,
+        volume_sma,
+        level_lookback,
+        band_length,
+        band_multiplier,
+        rsi_length,
+        tp_atr_multiple,
+        stop_buffer_atr,
+        max_stop_atr,
+        min_reward_risk,
+        pullback_tolerance_atr,
+        minimum_entry_score,
+        risk_per_trade_pct,
+        round_trip_cost_pct,
+        account_equity_quote,
+    ):
+        current_price = self.close[0]
+        new_sim_bar = self.bar_index != self._sim_bar_index
+        if (self._mtf_trend_length != trend_length
+                or self._mtf_radar_length != radar_length
+                or self._mtf_volume_sma != volume_sma
+                or self._mtf_band_length != band_length
+                or self._mtf_rsi_length != rsi_length):
+            self._mtf_trend_length = trend_length
+            self._mtf_radar_length = radar_length
+            self._mtf_volume_sma = volume_sma
+            self._mtf_band_length = band_length
+            self._mtf_rsi_length = rsi_length
+            self._mtf_time_scale = 0
+            self._mtf_chart_is_1m = False
+            self._mtf_frames = [
+                self._new_mtf_frame(5),
+                self._new_mtf_frame(15),
+                self._new_mtf_frame(60),
+                self._new_mtf_frame(240),
+            ]
+        if new_sim_bar and len(self.close) >= 2:
+            self._update_multi_timeframe(
+                self.time[0], self.time[1],
+                self.open[1], self.high[1], self.low[1],
+                self.close[1], self.volume[1], trend_length,
+                radar_length, volume_sma, band_length, rsi_length,
+            )
+        price_changed = False
+        price_went_up = False
+        price_went_down = False
+        if self.is_last_bar:
+            if self._has_live_baseline and not isnan(self._last_live_price):
+                if current_price > self._last_live_price:
+                    price_changed = True
+                    price_went_up = True
+                elif current_price < self._last_live_price:
+                    price_changed = True
+                    price_went_down = True
+            self._last_live_price = current_price
+            self._has_live_baseline = True
+
+        fast_ema = Ema.new(self.close, trend_length)
+        slow_ema = Ema.new(self.close, trend_length * 2)
+        ema_up = fast_ema[0] > slow_ema[0]
+
+        atr_value = nan
+        if len(self.close) >= radar_length:
+            atr_value = Atr.new(radar_length)[0]
+
+        volume_ready = False
+        volume_ok = False
+        previous_volume_ok = False
+        if len(self.close) >= volume_sma:
+            volume_average = Sma.new(self.volume, volume_sma)
+            volume_reference = volume_average[0]
+            if len(self.close) >= volume_sma + 1:
+                volume_reference = volume_average[1]
+            if len(self.close) >= volume_sma + 2:
+                previous_volume_ok = self.volume[1] > volume_average[2]
+            volume_ready = True
+            volume_ok = self.volume[0] > volume_reference
+
+        support = nan
+        resistance = nan
+        prior_support = nan
+        prior_resistance = nan
+        resistance_two_bars_ago = nan
+        support_two_bars_ago = nan
+        if len(self.close) >= level_lookback:
+            low_series = Lowest.new(self.low, level_lookback)
+            high_series = Highest.new(self.high, level_lookback)
+            support = low_series[0]
+            resistance = high_series[0]
+            if len(self.close) >= level_lookback + 1:
+                prior_support = low_series[1]
+                prior_resistance = high_series[1]
+            if len(self.close) >= level_lookback + 2:
+                support_two_bars_ago = low_series[2]
+                resistance_two_bars_ago = high_series[2]
+
+        bb_lower = nan
+        bb_middle = nan
+        bb_upper = nan
+        if len(self.close) >= band_length:
+            bb_lower_series, bb_middle_series, bb_upper_series = Bb.new(
+                self.close, band_length, band_multiplier,
+            )
+            bb_lower = bb_lower_series[0]
+            bb_middle = bb_middle_series[0]
+            bb_upper = bb_upper_series[0]
+
+        rsi_value = nan
+        if len(self.close) >= rsi_length:
+            rsi_value = Rsi.new(self.close, rsi_length)[0]
+
+        market_trending = False
+        if atr_value > 0:
+            ema_spread = abs(fast_ema[0] - slow_ema[0])
+            if ema_spread >= atr_value * 0.1:
+                market_trending = True
+
+        market_text = 'RANGE'
+        if market_trending:
+            if ema_up:
+                market_text = 'UPTREND'
+            else:
+                market_text = 'DOWNTREND'
+
+        mtf_5m = self._mtf_frames[0]
+        mtf_15m = self._mtf_frames[1]
+        mtf_1h = self._mtf_frames[2]
+        mtf_4h = self._mtf_frames[3]
+        mtf_ready = self._mtf_chart_is_1m
+        for mtf_frame in self._mtf_frames:
+            if not mtf_frame['ready']:
+                mtf_ready = False
+        # Weighted MTF rule: 5m/15m/1h/4h scores weigh 1/2/3/4; 15m
+        # direction must agree, while 1h and 4h must not oppose the entry.
+        # This is a confluence filter, not a claim of an optimal or profitable strategy.
+        mtf_weighted_score = (
+            mtf_5m['score']
+            + mtf_15m['score'] * 2
+            + mtf_1h['score'] * 3
+            + mtf_4h['score'] * 4
+        )
+        mtf_long_ok = (
+            mtf_ready
+            and mtf_15m['trend'] > 0
+            and mtf_1h['trend'] >= 0
+            and mtf_4h['trend'] >= 0
+            and mtf_weighted_score >= 8
+        )
+        mtf_short_ok = (
+            mtf_ready
+            and mtf_15m['trend'] < 0
+            and mtf_1h['trend'] <= 0
+            and mtf_4h['trend'] <= 0
+            and mtf_weighted_score <= -8
+        )
+
+        # Transparent confluence points: EMA/ATR direction (2), Bollinger mid (1),
+        # RSI extremes (1), and above-average volume in trend direction (1).
+        # Points are rule alignment, not a win probability.
+        confluence = 0
+        if market_trending:
+            if ema_up:
+                confluence = confluence + 2
+            else:
+                confluence = confluence - 2
+        if not isnan(bb_middle):
+            if self.close[0] > bb_middle:
+                confluence = confluence + 1
+            elif self.close[0] < bb_middle:
+                confluence = confluence - 1
+        if not isnan(rsi_value):
+            if rsi_value >= 55.0:
+                confluence = confluence + 1
+            elif rsi_value <= 45.0:
+                confluence = confluence - 1
+        if market_trending and volume_ready and volume_ok:
+            if ema_up:
+                confluence = confluence + 1
+            else:
+                confluence = confluence - 1
+
+        near_support = False
+        near_resistance = False
+        if atr_value > 0 and not isnan(support) and not isnan(resistance):
+            if abs(self.close[0] - support) <= atr_value * 0.5:
+                near_support = True
+            if abs(self.close[0] - resistance) <= atr_value * 0.5:
+                near_resistance = True
+
+        upside_breakout = False
+        downside_breakdown = False
+        if not isnan(prior_resistance) and self.close[0] > prior_resistance:
+            upside_breakout = True
+        if not isnan(prior_support) and self.close[0] < prior_support:
+            downside_breakdown = True
+
+        bullish_candle = False
+        bearish_candle = False
+        bullish_confirmation = False
+        bearish_confirmation = False
+        bar_range = self.high[0] - self.low[0]
+        candle_body = abs(self.close[0] - self.open[0])
+        if len(self.close) >= 2 and bar_range > 0:
+            if (self.close[0] > self.open[0]
+                    and candle_body >= bar_range * 0.3
+                    and self.close[0] >= self.low[0] + bar_range * 0.65):
+                bullish_candle = True
+                if self.close[0] > self.close[1]:
+                    bullish_confirmation = True
+            if (self.close[0] < self.open[0]
+                    and candle_body >= bar_range * 0.3
+                    and self.close[0] <= self.low[0] + bar_range * 0.35):
+                bearish_candle = True
+                if self.close[0] < self.close[1]:
+                    bearish_confirmation = True
+
+        long_momentum_ok = False
+        short_momentum_ok = False
+        if not isnan(rsi_value):
+            if rsi_value >= 45.0 and rsi_value <= 75.0:
+                long_momentum_ok = True
+            if rsi_value >= 25.0 and rsi_value <= 55.0:
+                short_momentum_ok = True
+
+        long_ema_pullback = False
+        short_ema_pullback = False
+        if atr_value > 0 and market_trending:
+            if (ema_up
+                    and self.low[0] <= fast_ema[0] + atr_value * pullback_tolerance_atr
+                    and self.close[0] > fast_ema[0]):
+                long_ema_pullback = True
+            if (not ema_up
+                    and self.high[0] >= fast_ema[0] - atr_value * pullback_tolerance_atr
+                    and self.close[0] < fast_ema[0]):
+                short_ema_pullback = True
+
+        # A conservative first-break close can enter without waiting for a full retest,
+        # but only with trend, volume, a strong close, and limited extension beyond the level.
+        long_breakout_continuation = False
+        short_breakdown_continuation = False
+        if (len(self.close) >= level_lookback + 2
+                and atr_value > 0
+                and not isnan(prior_resistance)
+                and not isnan(resistance_two_bars_ago)):
+            if (self.close[0] > prior_resistance
+                    and self.close[1] <= resistance_two_bars_ago
+                    and market_trending and ema_up
+                    and confluence >= minimum_entry_score
+                    and volume_ok and long_momentum_ok and bullish_candle
+                    and current_price > fast_ema[0]
+                    and current_price - prior_resistance <= atr_value * 0.75):
+                long_breakout_continuation = True
+
+        if (len(self.close) >= level_lookback + 2
+                and atr_value > 0
+                and not isnan(prior_support)
+                and not isnan(support_two_bars_ago)):
+            if (self.close[0] < prior_support
+                    and self.close[1] >= support_two_bars_ago
+                    and market_trending and not ema_up
+                    and confluence <= -minimum_entry_score
+                    and volume_ok and short_momentum_ok and bearish_candle
+                    and current_price < fast_ema[0]
+                    and prior_support - current_price <= atr_value * 0.75):
+                short_breakdown_continuation = True
+
+        # Also retain the stricter follow-up retest path after a prior-bar breakout.
+        long_breakout_retest = False
+        short_breakdown_retest = False
+        if (len(self.close) >= level_lookback + 2
+                and len(self.close) >= volume_sma + 2
+                and len(self.close) >= trend_length * 2 + 2
+                and atr_value > 0
+                and previous_volume_ok):
+            prior_bar_broke_up = (
+                self.close[1] > resistance_two_bars_ago
+                and self.close[1] > self.open[1]
+                and fast_ema[1] > slow_ema[1]
+            )
+            prior_bar_broke_down = (
+                self.close[1] < support_two_bars_ago
+                and self.close[1] < self.open[1]
+                and fast_ema[1] < slow_ema[1]
+            )
+            if (prior_bar_broke_up and market_trending and ema_up
+                    and confluence >= 2 and long_momentum_ok
+                    and self.low[0] <= resistance_two_bars_ago + atr_value * 0.2
+                    and self.close[0] > resistance_two_bars_ago + atr_value * 0.05
+                    and bullish_candle):
+                long_breakout_retest = True
+            if (prior_bar_broke_down and market_trending and not ema_up
+                    and confluence <= -2 and short_momentum_ok
+                    and self.high[0] >= support_two_bars_ago - atr_value * 0.2
+                    and self.close[0] < support_two_bars_ago - atr_value * 0.05
+                    and bearish_candle):
+                short_breakdown_retest = True
+
+        # Avoid opening into an immediate obstacle: require at least 0.5 ATR of room.
+        long_room_ok = True
+        short_room_ok = True
+        if atr_value > 0 and not isnan(prior_resistance):
+            if (prior_resistance > current_price
+                    and prior_resistance - current_price <= atr_value * 0.5):
+                long_room_ok = False
+        if atr_value > 0 and not isnan(prior_support):
+            if (prior_support < current_price
+                    and current_price - prior_support <= atr_value * 0.5):
+                short_room_ok = False
+
+        # Risk gates: define a structural stop, reject excessive stop distances, and
+        # require minimum estimated net reward/risk after the configured cost allowance.
+        # Targets/stops remain references; this indicator cannot place or guarantee orders.
+        long_target_value = nan
+        short_target_value = nan
+        long_stop_value = nan
+        short_stop_value = nan
+        long_stop_distance = nan
+        short_stop_distance = nan
+        long_risk_unit_distance = nan
+        short_risk_unit_distance = nan
+        long_reward_risk = nan
+        short_reward_risk = nan
+        long_risk_ok = False
+        short_risk_ok = False
+        risk_ready = account_equity_quote > 0.0 and risk_per_trade_pct > 0.0
+        risk_budget_quote = nan
+        if risk_ready:
+            risk_budget_quote = account_equity_quote * risk_per_trade_pct / 100.0
+
+        if atr_value > 0:
+            long_target_value = current_price + atr_value * tp_atr_multiple
+            if (not isnan(prior_resistance)
+                    and prior_resistance > current_price + atr_value * 0.5
+                    and prior_resistance <= current_price + atr_value * tp_atr_multiple * 2.0):
+                long_target_value = prior_resistance - atr_value * 0.1
+
+            short_target_value = current_price - atr_value * tp_atr_multiple
+            if (not isnan(prior_support)
+                    and prior_support < current_price - atr_value * 0.5
+                    and prior_support >= current_price - atr_value * tp_atr_multiple * 2.0):
+                short_target_value = prior_support + atr_value * 0.1
+
+            long_stop_anchor = nan
+            if long_breakout_retest and not isnan(resistance_two_bars_ago):
+                long_stop_anchor = self.low[0]
+                if resistance_two_bars_ago < long_stop_anchor:
+                    long_stop_anchor = resistance_two_bars_ago
+            elif long_breakout_continuation and not isnan(prior_resistance):
+                long_stop_anchor = self.low[0]
+                if prior_resistance < long_stop_anchor:
+                    long_stop_anchor = prior_resistance
+            elif long_ema_pullback:
+                long_stop_anchor = self.low[0]
+            elif not isnan(support):
+                long_stop_anchor = support
+            if not isnan(long_stop_anchor):
+                long_stop_value = long_stop_anchor - atr_value * stop_buffer_atr
+
+            short_stop_anchor = nan
+            if short_breakdown_retest and not isnan(support_two_bars_ago):
+                short_stop_anchor = self.high[0]
+                if support_two_bars_ago > short_stop_anchor:
+                    short_stop_anchor = support_two_bars_ago
+            elif short_breakdown_continuation and not isnan(prior_support):
+                short_stop_anchor = self.high[0]
+                if prior_support > short_stop_anchor:
+                    short_stop_anchor = prior_support
+            elif short_ema_pullback:
+                short_stop_anchor = self.high[0]
+            elif not isnan(resistance):
+                short_stop_anchor = resistance
+            if not isnan(short_stop_anchor):
+                short_stop_value = short_stop_anchor + atr_value * stop_buffer_atr
+
+            if (long_stop_value < current_price
+                    and long_target_value > current_price):
+                long_stop_distance = current_price - long_stop_value
+                long_reward_distance = long_target_value - current_price
+                long_cost_per_unit = current_price * round_trip_cost_pct / 100.0
+                long_net_reward = long_reward_distance - long_cost_per_unit
+                long_risk_unit_distance = long_stop_distance + long_cost_per_unit
+                if long_risk_unit_distance > 0:
+                    long_reward_risk = long_net_reward / long_risk_unit_distance
+                    if (long_stop_distance <= atr_value * max_stop_atr
+                            and long_net_reward > 0
+                            and long_reward_risk >= min_reward_risk):
+                        long_risk_ok = True
+
+            if (short_stop_value > current_price
+                    and short_target_value < current_price):
+                short_stop_distance = short_stop_value - current_price
+                short_reward_distance = current_price - short_target_value
+                short_cost_per_unit = current_price * round_trip_cost_pct / 100.0
+                short_net_reward = short_reward_distance - short_cost_per_unit
+                short_risk_unit_distance = short_stop_distance + short_cost_per_unit
+                if short_risk_unit_distance > 0:
+                    short_reward_risk = short_net_reward / short_risk_unit_distance
+                    if (short_stop_distance <= atr_value * max_stop_atr
+                            and short_net_reward > 0
+                            and short_reward_risk >= min_reward_risk):
+                        short_risk_ok = True
+
+        # Sensitivity is adjustable by score/tolerance; every setup still needs a
+        # directional close, momentum, room, and a valid stop/target plan.
+        long_setup_candidate = False
+        short_setup_candidate = False
+        if ((confluence >= minimum_entry_score and (near_support or long_ema_pullback)
+                and not near_resistance and bullish_confirmation
+                and long_momentum_ok and long_room_ok)
+                or (long_breakout_retest and long_room_ok)
+                or (long_breakout_continuation and long_room_ok)):
+            long_setup_candidate = True
+        if ((confluence <= -minimum_entry_score and (near_resistance or short_ema_pullback)
+                and not near_support and bearish_confirmation
+                and short_momentum_ok and short_room_ok)
+                or (short_breakdown_retest and short_room_ok)
+                or (short_breakdown_continuation and short_room_ok)):
+            short_setup_candidate = True
+
+        long_mtf_blocked = long_setup_candidate and long_risk_ok and not mtf_long_ok
+        short_mtf_blocked = short_setup_candidate and short_risk_ok and not mtf_short_ok
+        long_candidate = long_setup_candidate and long_risk_ok and mtf_long_ok
+        short_candidate = short_setup_candidate and short_risk_ok and mtf_short_ok
+        if long_candidate and short_candidate:
+            long_candidate = False
+            short_candidate = False
+
+        buy_entry_marker = nan
+        sell_entry_marker = nan
+        tp_reference_marker = nan
+        stop_reference_marker = nan
+        tp_exit_marker = nan
+        stop_exit_marker = nan
+
+        if new_sim_bar:
+            self._sim_bar_index = self.bar_index
+            self._sim_entry_event_bar = -1
+            self._sim_entry_event_side = 0
+            self._sim_entry_event_price = nan
+            self._sim_stop_ref_event_bar = -1
+            self._sim_stop_ref_event_price = nan
+            self._sim_tp_ref_event_bar = -1
+            self._sim_tp_ref_event_price = nan
+            self._sim_exit_event_bar = -1
+            self._sim_exit_event_type = 0
+            self._sim_exit_event_price = nan
+
+            pending_side = self._pending_side
+            pending_stop = self._pending_stop
+            pending_target = self._pending_target
+            pending_max_stop_distance = self._pending_max_stop_distance
+            self._pending_side = 0
+            self._pending_stop = nan
+            self._pending_target = nan
+            self._pending_max_stop_distance = nan
+
+            # Never stack positions. Recheck MTF alignment at the next open in case
+            # a higher-timeframe candle completed after the 1m signal was queued.
+            # Skip entries that gap through their stop or target.
+            if self._sim_side == 0 and pending_side != 0:
+                entry_price = self.open[0]
+                entry_geometry_ok = False
+                entry_mtf_ok = False
+                if pending_side > 0 and mtf_long_ok:
+                    entry_mtf_ok = True
+                elif pending_side < 0 and mtf_short_ok:
+                    entry_mtf_ok = True
+                entry_stop_distance = nan
+                entry_reward_distance = nan
+                if pending_side > 0:
+                    if entry_price > pending_stop and entry_price < pending_target:
+                        entry_geometry_ok = True
+                        entry_stop_distance = entry_price - pending_stop
+                        entry_reward_distance = pending_target - entry_price
+                elif pending_side < 0:
+                    if entry_price < pending_stop and entry_price > pending_target:
+                        entry_geometry_ok = True
+                        entry_stop_distance = pending_stop - entry_price
+                        entry_reward_distance = entry_price - pending_target
+
+                if (entry_geometry_ok and entry_mtf_ok
+                        and not isnan(pending_max_stop_distance)
+                        and entry_stop_distance > 0):
+                    entry_cost_per_unit = entry_price * round_trip_cost_pct / 100.0
+                    entry_risk_per_unit = entry_stop_distance + entry_cost_per_unit
+                    entry_net_reward = entry_reward_distance - entry_cost_per_unit
+                    entry_reward_risk = nan
+                    if entry_risk_per_unit > 0:
+                        entry_reward_risk = entry_net_reward / entry_risk_per_unit
+                    if (entry_stop_distance <= pending_max_stop_distance
+                            and entry_net_reward > 0
+                            and entry_reward_risk >= min_reward_risk):
+                        sim_units = 1.0
+                        if risk_ready:
+                            sim_units = risk_budget_quote / entry_risk_per_unit
+                        if sim_units > 0:
+                            self._sim_side = pending_side
+                            self._sim_entry_price = entry_price
+                            self._sim_entry_time = self.time[0]
+                            self._sim_stop = pending_stop
+                            self._sim_target = pending_target
+                            self._sim_units = sim_units
+                            self._sim_trade_count = self._sim_trade_count + 1
+                            self._sim_entry_event_bar = self.bar_index
+                            self._sim_entry_event_side = pending_side
+                            self._sim_entry_event_price = entry_price
+                            self._sim_stop_ref_event_bar = self.bar_index
+                            self._sim_stop_ref_event_price = pending_stop
+                            self._sim_tp_ref_event_bar = self.bar_index
+                            self._sim_tp_ref_event_price = pending_target
+
+        # Check open simulated positions on every live update. If one OHLC bar touches
+        # both levels, resolve it conservatively as a stop-out before a target fill.
+        if self._sim_side != 0:
+            stop_hit = False
+            target_hit = False
+            exit_type = 0
+            exit_price = nan
+            if self._sim_side > 0:
+                if self.low[0] <= self._sim_stop:
+                    stop_hit = True
+                if self.high[0] >= self._sim_target:
+                    target_hit = True
+            else:
+                if self.high[0] >= self._sim_stop:
+                    stop_hit = True
+                if self.low[0] <= self._sim_target:
+                    target_hit = True
+
+            if stop_hit:
+                exit_type = -1
+                exit_price = self._sim_stop
+                if self._sim_side > 0 and self.open[0] < self._sim_stop:
+                    exit_price = self.open[0]
+                elif self._sim_side < 0 and self.open[0] > self._sim_stop:
+                    exit_price = self.open[0]
+            elif target_hit:
+                exit_type = 1
+                exit_price = self._sim_target
+
+            if exit_type != 0:
+                trade_move = (exit_price - self._sim_entry_price) * self._sim_side
+                trade_cost = self._sim_entry_price * round_trip_cost_pct / 100.0
+                trade_pnl = (trade_move - trade_cost) * self._sim_units
+                self._sim_realized_pnl = self._sim_realized_pnl + trade_pnl
+                self._sim_exit_event_bar = self.bar_index
+                self._sim_exit_event_type = exit_type
+                self._sim_exit_event_price = exit_price
+                if exit_type > 0:
+                    self._sim_tp_count = self._sim_tp_count + 1
+                else:
+                    self._sim_stop_count = self._sim_stop_count + 1
+
+                if not isnan(self._sim_entry_time) and not isnan(self.time[0]):
+                    exit_line_color = color.rgba(0, 255, 0, 1.0)
+                    if exit_type < 0:
+                        exit_line_color = color.rgba(255, 0, 180, 1.0)
+                    self.chart.draw(
+                        LineSegment(
+                            AbsolutePosition(self._sim_entry_time, self._sim_entry_price),
+                            AbsolutePosition(self.time[0], exit_price),
+                            color=exit_line_color,
+                            line_width=2,
+                        )
+                    )
+
+                self._sim_side = 0
+                self._sim_entry_price = nan
+                self._sim_entry_time = nan
+                self._sim_stop = nan
+                self._sim_target = nan
+                self._sim_units = 0.0
+
+        # Save only this candle's final eligible setup for a next-open paper fill.
+        # No new pending entry is queued on a candle where a trade just exited.
+        if (self._sim_side == 0
+                and self._sim_exit_event_bar != self.bar_index):
+            if long_candidate:
+                self._pending_side = 1
+                self._pending_stop = long_stop_value
+                self._pending_target = long_target_value
+                self._pending_max_stop_distance = atr_value * max_stop_atr
+            elif short_candidate:
+                self._pending_side = -1
+                self._pending_stop = short_stop_value
+                self._pending_target = short_target_value
+                self._pending_max_stop_distance = atr_value * max_stop_atr
+            else:
+                self._pending_side = 0
+                self._pending_stop = nan
+                self._pending_target = nan
+                self._pending_max_stop_distance = nan
+        else:
+            self._pending_side = 0
+            self._pending_stop = nan
+            self._pending_target = nan
+            self._pending_max_stop_distance = nan
+
+        if self._sim_entry_event_bar == self.bar_index:
+            if self._sim_entry_event_side > 0:
+                buy_entry_marker = self._sim_entry_event_price
+            else:
+                sell_entry_marker = self._sim_entry_event_price
+        if self._sim_stop_ref_event_bar == self.bar_index:
+            stop_reference_marker = self._sim_stop_ref_event_price
+        if self._sim_tp_ref_event_bar == self.bar_index:
+            tp_reference_marker = self._sim_tp_ref_event_price
+        if self._sim_exit_event_bar == self.bar_index:
+            if self._sim_exit_event_type > 0:
+                tp_exit_marker = self._sim_exit_event_price
+            elif self._sim_exit_event_type < 0:
+                stop_exit_marker = self._sim_exit_event_price
+
+        report_text = 'Mixed price action'
+        if long_mtf_blocked or short_mtf_blocked:
+            report_text = 'MTF filter; wait for alignment'
+        elif long_breakout_continuation:
+            report_text = 'Breakout confirmed; buy next open'
+        elif short_breakdown_continuation:
+            report_text = 'Breakdown confirmed; sell next open'
+        elif long_breakout_retest:
+            report_text = 'Breakout retest confirmed'
+        elif short_breakdown_retest:
+            report_text = 'Breakdown retest confirmed'
+        elif upside_breakout:
+            report_text = 'Breakout; wait retest'
+        elif downside_breakdown:
+            report_text = 'Breakdown; wait retest'
+        elif near_support:
+            report_text = 'SUP test; buyers unconfirmed'
+        elif near_resistance:
+            report_text = 'RES test; sellers unconfirmed'
+        elif market_trending and ema_up:
+            report_text = 'Bullish EMA pressure'
+        elif market_trending:
+            report_text = 'Bearish EMA pressure'
+
+        scenario_text = 'MIXED: wait for setup'
+        if long_candidate:
+            scenario_text = 'LONG WATCH: bull close'
+        elif short_candidate:
+            scenario_text = 'SHORT WATCH: bear close'
+        elif upside_breakout:
+            scenario_text = 'BREAKOUT: wait retest'
+        elif downside_breakdown:
+            scenario_text = 'BREAKDOWN: wait retest'
+        elif confluence >= 3 and near_support:
+            scenario_text = 'SUP: quality filter'
+        elif confluence <= -3 and near_resistance:
+            scenario_text = 'RES: quality filter'
+        elif confluence >= 3:
+            scenario_text = 'BULLISH: wait pullback'
+        elif confluence <= -3:
+            scenario_text = 'BEARISH: wait rally'
+        if long_setup_candidate and not long_risk_ok:
+            scenario_text = 'RISK FILTER: stop/RR'
+        elif short_setup_candidate and not short_risk_ok:
+            scenario_text = 'RISK FILTER: stop/RR'
+        elif long_mtf_blocked or short_mtf_blocked:
+            scenario_text = 'MTF FILTER: WAIT ALIGNMENT'
+        elif not risk_ready and not long_candidate and not short_candidate:
+            scenario_text = 'SIM: 1 UNIT'
+
+        price_precision = self.info.price_precision
+        if price_precision > 5:
+            price_precision = 2
+        price_text = str(round(self.close[0], price_precision))
+        confluence_text = str(confluence)
+        if confluence > 0:
+            confluence_text = '+' + confluence_text
+
+        mtf_5m_text = str(mtf_5m['score'])
+        mtf_15m_text = str(mtf_15m['score'])
+        mtf_1h_text = str(mtf_1h['score'])
+        mtf_4h_text = str(mtf_4h['score'])
+        if mtf_5m['score'] > 0:
+            mtf_5m_text = '+' + mtf_5m_text
+        if mtf_15m['score'] > 0:
+            mtf_15m_text = '+' + mtf_15m_text
+        if mtf_1h['score'] > 0:
+            mtf_1h_text = '+' + mtf_1h_text
+        if mtf_4h['score'] > 0:
+            mtf_4h_text = '+' + mtf_4h_text
+        mtf_text = 'MTF NEEDS 1M CHART'
+        if self._mtf_chart_is_1m:
+            if not mtf_ready:
+                mtf_text = 'MTF WARMUP 5m/15m/1h/4h'
+            else:
+                mtf_status = 'WAIT'
+                if mtf_long_ok:
+                    mtf_status = 'BUY OK'
+                elif mtf_short_ok:
+                    mtf_status = 'SELL OK'
+                mtf_text = (
+                    'MTF 5/15m,1h,4h ' + mtf_5m_text + '/'
+                    + mtf_15m_text + '/' + mtf_1h_text + '/'
+                    + mtf_4h_text + ' ' + mtf_status
+                )
+
+        support_text = 'warming up'
+        resistance_text = 'warming up'
+        if not isnan(support):
+            support_text = str(round(support, price_precision))
+        if not isnan(resistance):
+            resistance_text = str(round(resistance, price_precision))
+
+        band_text = 'WAIT'
+        if not isnan(bb_lower) and not isnan(bb_upper):
+            band_text = (
+                str(round(bb_lower, price_precision))
+                + '/' + str(round(bb_upper, price_precision))
+            )
+
+        rsi_display = 'WAIT'
+        if not isnan(rsi_value):
+            rsi_display = str(round(rsi_value, 1))
+
+        tick_text = 'PRICE STEADY'
+        if self.is_last_bar and price_changed:
+            if price_went_up:
+                tick_text = 'UP TICK'
+            elif price_went_down:
+                tick_text = 'DOWN TICK'
+
+        volume_short = 'VOL WAIT'
+        if volume_ready and not isnan(self.volume[0]):
+            volume_short = 'VOL ' + str(round(self.volume[0], 0))
+            if volume_ok:
+                volume_short = volume_short + ' >AVG'
+            else:
+                volume_short = volume_short + ' <AVG'
+
+        sim_state_text = 'FLAT'
+        if self._sim_side > 0:
+            sim_state_text = 'BUY OPEN'
+        elif self._sim_side < 0:
+            sim_state_text = 'SELL OPEN'
+        elif self._pending_side > 0:
+            sim_state_text = 'BUY NEXT'
+        elif self._pending_side < 0:
+            sim_state_text = 'SELL NEXT'
+        if self._sim_exit_event_bar == self.bar_index:
+            if self._sim_exit_event_type > 0:
+                sim_state_text = 'TP HIT'
+            elif self._sim_exit_event_type < 0:
+                sim_state_text = 'STOP HIT'
+
+        sim_summary = (
+            'SIM ' + sim_state_text + ' | N ' + str(self._sim_trade_count)
+            + ' TP ' + str(self._sim_tp_count) + ' SL ' + str(self._sim_stop_count)
+        )
+        sim_pnl_label = 'NET P/L/1U ' + str(round(self._sim_realized_pnl, 2))
+        if risk_ready:
+            sim_pnl_label = 'NET P/L ' + str(round(self._sim_realized_pnl, 2))
+
+        panel_text = (
+            'LIVE ' + market_text + ' | ' + price_text + ' | SCORE ' + confluence_text + '\n'
+            + tick_text + ' | ' + report_text + '\n'
+            + mtf_text + '\n'
+            + 'BB L/U ' + band_text + ' | RSI ' + rsi_display + '\n'
+            + volume_short + ' | ' + scenario_text + '\n'
+            + sim_summary + '\n'
+            + 'L/S trader counts: unavailable'
+        )
+
+        support_color = color.rgba(0, 180, 0, 1.0)
+        resistance_color = color.rgba(255, 0, 180, 1.0)
+        if price_changed:
+            support_color = color.rgba(0, 255, 0, 1.0)
+            resistance_color = color.rgba(255, 0, 255, 1.0)
+
+        self._status_label.text = panel_text
+        self._status_label.text_color = color.rgba(255, 255, 255, 1.0)
+        self._support_label.text = 'S' + str(level_lookback) + ': ' + support_text
+        self._support_label.text_color = support_color
+        self._resistance_label.text = 'R' + str(level_lookback) + ': ' + resistance_text
+        self._resistance_label.text_color = resistance_color
+
+        trend_reason = 'EMA0'
+        if market_trending:
+            if ema_up:
+                trend_reason = 'EMA+2'
+            else:
+                trend_reason = 'EMA-2'
+        bb_reason = 'BB0'
+        if not isnan(bb_middle):
+            if self.close[0] > bb_middle:
+                bb_reason = 'BB+1'
+            elif self.close[0] < bb_middle:
+                bb_reason = 'BB-1'
+        rsi_reason = 'RSI0'
+        if not isnan(rsi_value):
+            if rsi_value >= 55.0:
+                rsi_reason = 'RSI+1'
+            elif rsi_value <= 45.0:
+                rsi_reason = 'RSI-1'
+        volume_reason = 'VOL0'
+        if market_trending and volume_ready and volume_ok:
+            if ema_up:
+                volume_reason = 'VOL+1'
+            else:
+                volume_reason = 'VOL-1'
+        candle_reason = 'C0'
+        if bullish_candle:
+            candle_reason = 'C+'
+        elif bearish_candle:
+            candle_reason = 'C-'
+
+        signal_name = 'WAIT'
+        if long_candidate:
+            signal_name = 'BUY SETUP'
+        elif short_candidate:
+            signal_name = 'SELL SETUP'
+        elif long_mtf_blocked:
+            signal_name = 'BUY MTF BLOCK'
+        elif short_mtf_blocked:
+            signal_name = 'SELL MTF BLOCK'
+        elif long_setup_candidate:
+            signal_name = 'BUY BLOCKED'
+        elif short_setup_candidate:
+            signal_name = 'SELL BLOCKED'
+
+        plan_text = 'WAIT: no simulated position'
+        if self._sim_exit_event_bar == self.bar_index:
+            if self._sim_exit_event_type > 0:
+                plan_text = 'TAKE PROFIT FILLED @ ' + str(round(self._sim_exit_event_price, price_precision))
+            elif self._sim_exit_event_type < 0:
+                plan_text = 'STOP FILLED @ ' + str(round(self._sim_exit_event_price, price_precision))
+        elif self._sim_side > 0:
+            plan_text = (
+                'BUY @ ' + str(round(self._sim_entry_price, price_precision))
+                + ' SL ' + str(round(self._sim_stop, price_precision))
+                + ' TP ' + str(round(self._sim_target, price_precision))
+            )
+        elif self._sim_side < 0:
+            plan_text = (
+                'SELL @ ' + str(round(self._sim_entry_price, price_precision))
+                + ' SL ' + str(round(self._sim_stop, price_precision))
+                + ' TP ' + str(round(self._sim_target, price_precision))
+            )
+        elif self._pending_side > 0:
+            plan_text = (
+                'BUY NEXT OPEN | SL ' + str(round(self._pending_stop, price_precision))
+                + ' TP ' + str(round(self._pending_target, price_precision))
+            )
+        elif self._pending_side < 0:
+            plan_text = (
+                'SELL NEXT OPEN | SL ' + str(round(self._pending_stop, price_precision))
+                + ' TP ' + str(round(self._pending_target, price_precision))
+            )
+        elif long_mtf_blocked or short_mtf_blocked:
+            if not self._mtf_chart_is_1m:
+                plan_text = 'WAIT: USE A 1M CHART'
+            elif not mtf_ready:
+                plan_text = 'WAIT: MTF WARMUP'
+            else:
+                plan_text = 'WAIT: MTF ALIGNMENT FILTER'
+        elif long_setup_candidate and not long_risk_ok:
+            plan_text = 'BUY BLOCKED: STOP/RR FILTER'
+        elif short_setup_candidate and not short_risk_ok:
+            plan_text = 'SELL BLOCKED: STOP/RR FILTER'
+
+        cost_text = 'COST ' + str(round(round_trip_cost_pct, 2)) + '%'
+        size_text = 'SIM 1 UNIT | ' + cost_text
+        if not risk_ready:
+            size_text = 'SIM 1 UNIT | EQ unset | ' + cost_text
+        elif self._sim_side != 0:
+            size_text = 'SIM QTY~' + str(round(self._sim_units, 8)) + ' | ' + cost_text
+        elif long_candidate and long_risk_unit_distance > 0:
+            long_units = risk_budget_quote / long_risk_unit_distance
+            size_text = 'PLAN QTY~' + str(round(long_units, 8)) + ' | ' + cost_text
+        elif short_candidate and short_risk_unit_distance > 0:
+            short_units = risk_budget_quote / short_risk_unit_distance
+            size_text = 'PLAN QTY~' + str(round(short_units, 8)) + ' | ' + cost_text
+        elif risk_ready:
+            size_text = (
+                'RISK ' + str(round(risk_per_trade_pct, 2))
+                + '% | WAIT | ' + cost_text
+            )
+
+        why_text = (
+            trend_reason + ' ' + bb_reason + ' ' + rsi_reason + ' '
+            + volume_reason + ' ' + candle_reason
+        )
+        analyst_text = (
+            'RULE SIM | NO LIVE ORDERS\n'
+            + 'STATE: ' + sim_state_text + ' | ' + signal_name + '\n'
+            + 'WHY: ' + why_text + '\n'
+            + plan_text + '\n'
+            + sim_pnl_label + '\n'
+            + size_text
+        )
+        self._analyst_label.text = analyst_text
+        self.chart.draw(self._status_label)
+        self.chart.draw(self._support_label)
+        self.chart.draw(self._resistance_label)
+        self.chart.draw(self._analyst_label)
+
+        ema_up_plot = nan
+        ema_down_plot = nan
+        if ema_up:
+            ema_up_plot = fast_ema[0]
+        else:
+            ema_down_plot = fast_ema[0]
+
+        # Return only scalar series values, one per plot decorator, in decorator order.
+        # This avoids the IOOutputValue wrappers Exness reported for plot.Line/plot.Fill.
+        return (
+            ema_up_plot,
+            ema_down_plot,
+            support,
+            resistance,
+            bb_lower,
+            bb_upper,
+            buy_entry_marker,
+            sell_entry_marker,
+            tp_reference_marker,
+            stop_reference_marker,
+            tp_exit_marker,
+            stop_exit_marker,
+        )
