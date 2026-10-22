@@ -389,14 +389,9 @@ class Main(MainContext):
                 or isnan(anchor_price) or isnan(atr_value) or atr_value <= 0.0):
             return
         half_width = bar_delta * 0.18
-        if side > 0:
-            tip_price = anchor_price - atr_value * 0.05
-            shaft_price = anchor_price - atr_value * 0.30
-            head_price = tip_price - atr_value * 0.14
-        else:
-            tip_price = anchor_price + atr_value * 0.05
-            shaft_price = anchor_price + atr_value * 0.30
-            head_price = tip_price + atr_value * 0.14
+        tip_price = anchor_price - atr_value * 0.05 * side
+        shaft_price = anchor_price - atr_value * 0.30 * side
+        head_price = tip_price - atr_value * 0.14 * side
         self.chart.draw(
             LineSegment(
                 AbsolutePosition(time_value, shaft_price),
