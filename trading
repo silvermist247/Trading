@@ -236,6 +236,12 @@ class Main(MainContext):
         self._sim_policy_last_bar = [-1, -1, -1]
         self._sim_last_net_r = nan
         self._sim_last_reward = nan
+        self._sim_last_review_exit_type = 0
+        self._sim_last_review_side = 0
+        self._sim_last_review_context = -1
+        self._sim_last_review_bar = -1
+        self._sim_last_review_penalty_before = 0
+        self._sim_last_review_penalty_after = 0
         self._status_label = LabelRel(
             '',
             RelativePosition(
@@ -544,6 +550,161 @@ class Main(MainContext):
             summary = summary + ' +' + str(penalty)
         return summary
 
+    def _last_trade_review_text(self) -> str:
+        review_text = 'REVIEW: no closed SIM trade yet'
+        stats_text = 'STATS: no outcomes; session resets on reinit'
+        fix_text = 'FIX: waiting for outcomes; entry gates unchanged'
+        audit_text = 'PASTE: A1|none'
+        if self._sim_last_review_exit_type != 0:
+            side_text = 'BUY'
+            side_code = 'B'
+            if self._sim_last_review_side < 0:
+                side_text = 'SELL'
+                side_code = 'S'
+
+            exit_text = 'closed'
+            exit_code = 'CL'
+            if self._sim_last_review_exit_type == -1:
+                exit_text = 'observed stop-out'
+                exit_code = 'SL'
+            elif self._sim_last_review_exit_type == 1:
+                exit_text = 'observed target'
+                exit_code = 'TP'
+            elif self._sim_last_review_exit_type == 2:
+                exit_text = 'simulated reversal'
+                exit_code = 'RV'
+            elif self._sim_last_review_exit_type == -2:
+                exit_text = 'drawdown lock'
+                exit_code = 'DD'
+
+            context_index = self._sim_last_review_context
+            context_text = 'N/A'
+            context_code = 'NA'
+            context_sample_count = 0
+            context_win_percent = 0
+            context_penalty_before = 0
+            context_penalty_after = 0
+            if context_index >= 0 and context_index <= 7:
+                context_text = self._entry_context_labels[context_index]
+                context_sample_count = int(
+                    self._entry_outcome_counts[context_index]
+                )
+                if context_sample_count > 0:
+                    context_win_percent = int(
+                        self._entry_win_counts[context_index] * 100.0
+                        / context_sample_count + 0.5
+                    )
+                context_penalty_before = (
+                    self._sim_last_review_penalty_before
+                )
+                context_penalty_after = self._sim_last_review_penalty_after
+                if context_index == 0:
+                    context_code = 'LP'
+                elif context_index == 1:
+                    context_code = 'LB'
+                elif context_index == 2:
+                    context_code = 'L5'
+                elif context_index == 3:
+                    context_code = 'LR'
+                elif context_index == 4:
+                    context_code = 'SP'
+                elif context_index == 5:
+                    context_code = 'SB'
+                elif context_index == 6:
+                    context_code = 'S5'
+                elif context_index == 7:
+                    context_code = 'SR'
+
+            net_r_text = 'NA'
+            adjusted_r_text = 'NA'
+            if not isnan(self._sim_last_net_r):
+                net_r_text = str(round(self._sim_last_net_r, 2))
+                if self._sim_last_net_r > 0.0:
+                    net_r_text = '+' + net_r_text
+            if not isnan(self._sim_last_reward):
+                adjusted_r_text = str(round(self._sim_last_reward, 2))
+                if self._sim_last_reward > 0.0:
+                    adjusted_r_text = '+' + adjusted_r_text
+
+            review_text = (
+                'REVIEW: SIM ' + side_text + ' ' + exit_text
+                + ' | net ' + net_r_text + 'R adj ' + adjusted_r_text + 'R'
+            )
+            if context_index >= 0 and context_index <= 7:
+                stats_text = (
+                    'STATS: ' + context_text + ' n' + str(context_sample_count)
+                    + ' win' + str(context_win_percent) + '% gate+'
+                    + str(context_penalty_after) + ' (reset on reinit)'
+                )
+            else:
+                stats_text = 'STATS: no entry bucket; session resets on reinit'
+
+            penalty_change = context_penalty_after - context_penalty_before
+            if self._sim_last_review_exit_type == -2:
+                if penalty_change > 0:
+                    fix_text = (
+                        'FIX: drawdown lock kept; score gate raised to +'
+                        + str(context_penalty_after)
+                    )
+                elif context_penalty_after > 0:
+                    fix_text = (
+                        'FIX: drawdown lock kept; score gate +'
+                        + str(context_penalty_after) + ' unchanged'
+                    )
+                else:
+                    fix_text = (
+                        'FIX: drawdown lock kept; no score-gate change'
+                    )
+            elif context_index < 0 or context_index > 7:
+                fix_text = 'FIX: no entry bucket; no score-gate change'
+                if self._sim_last_review_exit_type == -1:
+                    fix_text = fix_text + '; stop cause unproven'
+            elif penalty_change > 0:
+                fix_text = (
+                    'FIX: entry-score gate raised to +'
+                    + str(context_penalty_after) + ' for ' + context_text
+                )
+                if self._sim_last_review_exit_type == -1:
+                    fix_text = fix_text + '; stop cause unproven'
+            elif context_penalty_after > 0:
+                fix_text = (
+                    'FIX: no gate change; score gate +'
+                    + str(context_penalty_after) + ' remains for '
+                    + context_text
+                )
+                if self._sim_last_review_exit_type == -1:
+                    fix_text = fix_text + '; stop cause unproven'
+            elif (self._sim_last_review_exit_type == -1
+                    and context_sample_count < 8):
+                more_samples = 8 - context_sample_count
+                fix_text = (
+                    'FIX: no gate change; need ' + str(more_samples)
+                    + ' more closes; stop cause unproven'
+                )
+            elif self._sim_last_review_exit_type == -1:
+                fix_text = (
+                    'FIX: no gate change; weak-loss trigger not met; '
+                    + 'stop cause unproven'
+                )
+            elif self._sim_last_review_exit_type == 1:
+                fix_text = 'FIX: no gate change; keep current risk gates'
+            else:
+                fix_text = 'FIX: no entry-gate change; keep full-MTF checks'
+
+            audit_text = (
+                'PASTE: A1|b' + str(self._sim_last_review_bar) + '|'
+                + side_code + '|' + exit_code + '|' + context_code
+                + '|R' + net_r_text + '|A' + adjusted_r_text
+                + '|n' + str(context_sample_count)
+                + '|w' + str(context_win_percent)
+                + '|g' + str(context_penalty_after)
+                + '|d' + str(penalty_change)
+            )
+        return (
+            review_text + '\n' + stats_text + '\n'
+            + fix_text + '\n' + audit_text
+        )
+
     def _select_exit_policy(self, regime_index: int) -> int:
         if regime_index < 0 or regime_index > 2:
             return 1
@@ -613,6 +774,11 @@ class Main(MainContext):
                           account_equity_quote: float,
                           max_drawdown_pct: float) -> None:
         prior_drawdown_pct = self._sim_drawdown_pct
+        review_penalty_before = self._entry_score_penalty(
+            self._sim_entry_context
+        )
+        self._sim_last_net_r = nan
+        self._sim_last_reward = nan
         trade_move = (exit_price - self._sim_entry_price) * self._sim_side
         trade_cost = self._sim_entry_price * self._sim_entry_cost_pct / 100.0
         net_move = trade_move - trade_cost
@@ -642,6 +808,14 @@ class Main(MainContext):
                 self._sim_last_net_r > 0.0,
             )
 
+        self._sim_last_review_exit_type = exit_type
+        self._sim_last_review_side = self._sim_side
+        self._sim_last_review_context = self._sim_entry_context
+        self._sim_last_review_bar = self.bar_index
+        self._sim_last_review_penalty_before = review_penalty_before
+        self._sim_last_review_penalty_after = self._entry_score_penalty(
+            self._sim_entry_context
+        )
         self._sim_exit_event_bar = self.bar_index
         self._sim_exit_event_type = exit_type
         self._sim_exit_event_price = exit_price
@@ -3093,6 +3267,7 @@ class Main(MainContext):
             + chat_plot_text + '\n'
             + chat_policy_text + '\n'
             + entry_learning_summary + '\n'
+            + self._last_trade_review_text() + '\n'
             + chat_risk_text
         )
         self._chat_label.text_color = color.rgba(235, 243, 255, 1.0)
