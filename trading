@@ -242,6 +242,12 @@ class Main(MainContext):
         self._sim_last_review_bar = -1
         self._sim_last_review_penalty_before = 0
         self._sim_last_review_penalty_after = 0
+        self._last_status_display_text = ''
+        self._last_support_display_text = ''
+        self._last_resistance_display_text = ''
+        self._last_analyst_display_text = ''
+        self._last_chat_display_text = ''
+        self._last_progress_display_text = ''
         self._status_label = LabelRel(
             '',
             RelativePosition(
@@ -2417,12 +2423,34 @@ class Main(MainContext):
             support_color = color.rgba(0, 255, 0, 1.0)
             resistance_color = color.rgba(255, 0, 255, 1.0)
 
+        # Pulse changed readouts blue; unchanged support/resistance keep their colors.
+        update_flash_color = color.rgba(0, 170, 255, 1.0)
+        status_display_updated = (
+            panel_text != self._last_status_display_text
+        )
         self._status_label.text = panel_text
-        self._status_label.text_color = color.rgba(255, 255, 255, 1.0)
-        self._support_label.text = 'S' + str(level_lookback) + ': ' + support_text
+        if status_display_updated:
+            self._status_label.text_color = update_flash_color
+        else:
+            self._status_label.text_color = color.rgba(255, 255, 255, 1.0)
+        self._last_status_display_text = panel_text
+        support_display_text = (
+            'S' + str(level_lookback) + ': ' + support_text
+        )
+        resistance_display_text = (
+            'R' + str(level_lookback) + ': ' + resistance_text
+        )
+        self._support_label.text = support_display_text
+        if support_display_text != self._last_support_display_text:
+            support_color = update_flash_color
         self._support_label.text_color = support_color
-        self._resistance_label.text = 'R' + str(level_lookback) + ': ' + resistance_text
+        self._last_support_display_text = support_display_text
+        self._resistance_label.text = resistance_display_text
+        if (resistance_display_text
+                != self._last_resistance_display_text):
+            resistance_color = update_flash_color
         self._resistance_label.text_color = resistance_color
+        self._last_resistance_display_text = resistance_display_text
 
         trend_reason = 'EMA0'
         if market_trending:
@@ -2626,6 +2654,11 @@ class Main(MainContext):
             + self._center_text_line(tick_average_text, tick_line_width)
         )
         self._analyst_label.text = analyst_text
+        if analyst_text != self._last_analyst_display_text:
+            self._analyst_label.text_color = update_flash_color
+        else:
+            self._analyst_label.text_color = color.rgba(255, 255, 255, 1.0)
+        self._last_analyst_display_text = analyst_text
 
         chat_market_text = 'RANGE'
         if market_trending:
@@ -3249,7 +3282,7 @@ class Main(MainContext):
             else:
                 progress_bar_text = progress_bar_text + '-'
         progress_bar_text = progress_bar_text + ']'
-        self._progress_label.text = (
+        progress_display_text = (
             'BUY/SELL GATE READINESS | NOT WIN ODDS\n'
             + 'BUY  ' + buy_bar_text + ' ' + str(buy_readiness_pct) + '%\n'
             + 'SELL ' + sell_bar_text + ' ' + str(sell_readiness_pct) + '%\n'
@@ -3257,8 +3290,14 @@ class Main(MainContext):
             + str(entry_progress_pct) + '% | ' + entry_progress_data + '\n'
             + entry_progress_detail
         )
+        self._progress_label.text = progress_display_text
+        if progress_display_text != self._last_progress_display_text:
+            self._progress_label.text_color = update_flash_color
+        else:
+            self._progress_label.text_color = color.rgba(235, 243, 255, 1.0)
+        self._last_progress_display_text = progress_display_text
 
-        self._chat_label.text = (
+        chat_display_text = (
             'SIM RULES | ' + chart_chat_question + '\n'
             + 'READ: ' + chat_answer + '\n'
             + 'THINK: ' + chat_thought_text + '\n'
@@ -3270,9 +3309,14 @@ class Main(MainContext):
             + self._last_trade_review_text() + '\n'
             + chat_risk_text
         )
-        self._chat_label.text_color = color.rgba(235, 243, 255, 1.0)
+        self._chat_label.text = chat_display_text
+        if chat_display_text != self._last_chat_display_text:
+            self._chat_label.text_color = update_flash_color
+        else:
+            self._chat_label.text_color = color.rgba(235, 243, 255, 1.0)
+        self._last_chat_display_text = chat_display_text
 
-        # Keep captions white; only the numeric buy/sell counters flash.
+        # Tick counts keep their existing number-only green/red flashes.
         self._tick_buy_caption_label.text = tick_buy_caption
         self._tick_buy_count_label.text = tick_buy_count_text
         self._tick_sell_caption_label.text = tick_sell_caption
