@@ -66,7 +66,7 @@ from indie.drawings import (
     'chart_chat_question',
     default='Market read',
     options=['Market read', 'Why holding?', 'Risk / levels', 'Why waiting?'],
-    title='Compact HUD context question (select in settings)',
+    title='Top-right chart chat prompt (select in settings)',
 )
 @plot.line(
     id='ema_up', title='EMA uptrend',
@@ -245,14 +245,14 @@ class Main(MainContext):
         self._status_label = LabelRel(
             '',
             RelativePosition(
-                vertical_anchor=va.TOP,
+                vertical_anchor=va.BOTTOM,
                 horizontal_anchor=ha.LEFT,
-                top_bottom_ratio=0.08,
+                top_bottom_ratio=0.78,
                 left_right_ratio=0.02,
             ),
-            bg_color=color.rgba(12, 20, 31, 0.96),
+            bg_color=color.rgba(16, 28, 38, 0.92),
             text_color=color.rgba(255, 255, 255, 1.0),
-            font_size=9,
+            font_size=11,
         )
         self._support_label = LabelRel(
             '',
@@ -278,6 +278,18 @@ class Main(MainContext):
             text_color=color.rgba(255, 0, 180, 1.0),
             font_size=12,
         )
+        self._analyst_label = LabelRel(
+            '',
+            RelativePosition(
+                vertical_anchor=va.BOTTOM,
+                horizontal_anchor=ha.LEFT,
+                top_bottom_ratio=0.78,
+                left_right_ratio=0.55,
+            ),
+            bg_color=color.rgba(16, 28, 38, 0.92),
+            text_color=color.rgba(255, 255, 255, 1.0),
+            font_size=12,
+        )
         self._chat_label = LabelRel(
             '',
             RelativePosition(
@@ -288,7 +300,19 @@ class Main(MainContext):
             ),
             bg_color=color.rgba(12, 20, 31, 0.96),
             text_color=color.rgba(255, 255, 255, 1.0),
-            font_size=9,
+            font_size=10,
+        )
+        self._progress_label = LabelRel(
+            '',
+            RelativePosition(
+                vertical_anchor=va.TOP,
+                horizontal_anchor=ha.LEFT,
+                top_bottom_ratio=0.08,
+                left_right_ratio=0.02,
+            ),
+            bg_color=color.rgba(12, 20, 31, 0.96),
+            text_color=color.rgba(255, 255, 255, 1.0),
+            font_size=11,
         )
         self._tick_buy_caption_label = LabelRel(
             '',
@@ -2373,6 +2397,22 @@ class Main(MainContext):
         if equity_configured:
             sim_pnl_label = 'NET P/L ' + str(round(self._sim_realized_pnl, 2))
 
+        sim_summary = (
+            'SIM ' + sim_state_text + ' | N ' + str(self._sim_trade_count)
+            + ' TP ' + str(self._sim_tp_count) + ' SL ' + str(self._sim_stop_count)
+            + ' REV ' + str(self._sim_reversal_count)
+        )
+        panel_text = (
+            'LIVE ' + market_text + ' | ' + price_text + ' | SCORE ' + confluence_text + '\n'
+            + tick_text + ' | ' + report_text + '\n'
+            + mtf_text + '\n'
+            + 'BB L/U ' + band_text + ' | RSI ' + rsi_display + '\n'
+            + volume_short + ' | ' + scenario_text + '\n'
+            + sim_summary
+        )
+        self._status_label.text = panel_text
+        self._status_label.text_color = color.rgba(255, 255, 255, 1.0)
+
         support_color = color.rgba(0, 180, 0, 1.0)
         resistance_color = color.rgba(255, 0, 180, 1.0)
         if price_changed:
@@ -2541,6 +2581,12 @@ class Main(MainContext):
         tick_buy_caption = 'TICKS/BAR | BUY '
         tick_sell_caption = ' | SELL '
         tick_net_caption = ' | NET '
+        tick_line_width = (
+            len(tick_buy_caption) + len(tick_buy_count_text)
+            + len(tick_sell_caption) + len(tick_sell_count_text)
+            + len(tick_net_caption) + len(tick_net_text)
+        )
+
         tick_history_count = len(self._tick_up_history)
         tick_sample_count = tick_history_count + 1
         if tick_sample_count > 20:
@@ -2567,6 +2613,24 @@ class Main(MainContext):
             + str(round(average_buy_ticks, 1))
             + ' SELL ' + str(round(average_sell_ticks, 1))
         )
+
+        why_text = (
+            trend_reason + ' ' + bb_reason + ' ' + rsi_reason + ' '
+            + volume_reason + ' ' + candle_reason
+        )
+        analyst_text = (
+            self._center_text_line(
+                'STATE: ' + sim_state_text + ' | ' + signal_name,
+                tick_line_width,
+            ) + '\n'
+            + self._center_text_line('WHY: ' + why_text, tick_line_width) + '\n'
+            + self._center_text_line(plan_text, tick_line_width) + '\n'
+            + self._center_text_line(sim_pnl_label, tick_line_width) + '\n'
+            + self._center_text_line(size_text, tick_line_width) + '\n'
+            + self._center_text_line(tick_average_text, tick_line_width)
+        )
+        self._analyst_label.text = analyst_text
+        self._analyst_label.text_color = color.rgba(255, 255, 255, 1.0)
 
         chat_market_text = 'RANGE'
         if market_trending:
@@ -3160,42 +3224,60 @@ class Main(MainContext):
             buy_readiness_pct = 100
         if sell_readiness_pct > 100:
             sell_readiness_pct = 100
-        trade_stats_text = (
-            'N ' + str(self._sim_trade_count)
-            + ' TP ' + str(self._sim_tp_count)
-            + ' SL ' + str(self._sim_stop_count)
-            + ' REV ' + str(self._sim_reversal_count)
-        )
-        status_context_text = 'SETUP ' + report_text + ' | MTF ' + mtf_status
-        if chart_chat_question != 'Market read':
-            status_context_text = 'READ ' + chat_answer
-        status_context_text = (
-            status_context_text + ' | RSI ' + rsi_display
-            + ' | ' + volume_short
-        )
-        tick_average_compact_text = (
-            'AVG20 ' + str(tick_sample_count) + '/20 B/S '
-            + str(round(average_buy_ticks, 1)) + '/'
-            + str(round(average_sell_ticks, 1))
-        )
-        status_hud_text = (
-            'LIVE | ' + price_text + ' | ' + market_text
-            + ' | SCORE ' + confluence_text + '\n'
-            + status_context_text + '\n'
-            + 'SIM ' + sim_state_text + ' | ' + plan_text + '\n'
-            + 'GATE B' + str(buy_readiness_pct) + '/S'
-            + str(sell_readiness_pct) + '% (not win odds)'
-            + ' | NEXT ' + str(entry_progress_pct) + '% | '
-            + entry_progress_data + '\n'
-            + 'RISK ' + size_text + ' | ' + sim_pnl_label + '\n'
-            + 'RESULT ' + trade_stats_text + ' | ' + tick_average_compact_text
-        )
-        self._status_label.text = status_hud_text
-        self._status_label.text_color = color.rgba(255, 255, 255, 1.0)
+        buy_fill_count = int(buy_readiness_pct / 10)
+        sell_fill_count = int(sell_readiness_pct / 10)
+        if buy_fill_count > 10:
+            buy_fill_count = 10
+        if sell_fill_count > 10:
+            sell_fill_count = 10
+        buy_bar_text = '['
+        sell_bar_text = '['
+        for direction_bar_index in range(10):
+            if direction_bar_index < buy_fill_count:
+                buy_bar_text = buy_bar_text + '#'
+            else:
+                buy_bar_text = buy_bar_text + '-'
+            if direction_bar_index < sell_fill_count:
+                sell_bar_text = sell_bar_text + '#'
+            else:
+                sell_bar_text = sell_bar_text + '-'
+        buy_bar_text = buy_bar_text + ']'
+        sell_bar_text = sell_bar_text + ']'
 
-        # Keep the natural-language outcome, exact learner change, and audit
-        # string together in one compact top-right review card.
-        self._chat_label.text = self._last_trade_review_text()
+        progress_fill_count = int(entry_progress_pct / 10)
+        if progress_fill_count > 10:
+            progress_fill_count = 10
+        progress_bar_text = '['
+        for progress_bar_index in range(10):
+            if progress_bar_index < progress_fill_count:
+                progress_bar_text = progress_bar_text + '#'
+            else:
+                progress_bar_text = progress_bar_text + '-'
+        progress_bar_text = progress_bar_text + ']'
+        progress_display_text = (
+            'BUY/SELL GATE READINESS | NOT WIN ODDS\n'
+            + 'BUY  ' + buy_bar_text + ' ' + str(buy_readiness_pct) + '%\n'
+            + 'SELL ' + sell_bar_text + ' ' + str(sell_readiness_pct) + '%\n'
+            + 'NEXT ' + progress_bar_text + ' '
+            + str(entry_progress_pct) + '% | ' + entry_progress_data + '\n'
+            + entry_progress_detail
+        )
+        self._progress_label.text = progress_display_text
+        self._progress_label.text_color = color.rgba(255, 255, 255, 1.0)
+
+        chat_display_text = (
+            'SIM RULES | ' + chart_chat_question + '\n'
+            + 'READ: ' + chat_answer + '\n'
+            + 'THINK: ' + chat_thought_text + '\n'
+            + 'ACTION: ' + chat_action_text + '\n'
+            + 'SIM POS: ' + sim_state_text + ' | ' + chat_mode_text + '\n'
+            + chat_plot_text + '\n'
+            + chat_policy_text + '\n'
+            + entry_learning_summary + '\n'
+            + self._last_trade_review_text() + '\n'
+            + chat_risk_text
+        )
+        self._chat_label.text = chat_display_text
         self._chat_label.text_color = color.rgba(255, 255, 255, 1.0)
 
         # Tick counts keep their existing number-only green/red flashes.
@@ -3217,7 +3299,9 @@ class Main(MainContext):
         self.chart.draw(self._status_label)
         self.chart.draw(self._support_label)
         self.chart.draw(self._resistance_label)
+        self.chart.draw(self._analyst_label)
         self.chart.draw(self._chat_label)
+        self.chart.draw(self._progress_label)
         self.chart.draw(self._tick_buy_caption_label)
         self.chart.draw(self._tick_buy_count_label)
         self.chart.draw(self._tick_sell_caption_label)
