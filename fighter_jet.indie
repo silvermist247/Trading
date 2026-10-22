@@ -451,6 +451,39 @@ class Main(MainContext):
             return 1
         return 0
 
+    def _entry_context_summary(self, context_index: int) -> str:
+        if context_index < 0 or context_index > 7:
+            return 'N/A'
+        setup_slot = context_index % 4
+        setup_label = 'PULL'
+        if setup_slot == 1:
+            setup_label = 'BRK'
+        elif setup_slot == 2:
+            setup_label = '5M'
+        elif setup_slot == 3:
+            setup_label = 'REG'
+        sample_count = self._entry_outcome_counts[context_index]
+        sample_text = str(int(sample_count))
+        if sample_count < 8.0:
+            sample_text = sample_text + '/8'
+        summary = setup_label + ' ' + sample_text
+        if sample_count > 0.0:
+            mean_reward = self._entry_reward_sums[context_index] / sample_count
+            reward_text = str(round(mean_reward, 2))
+            if mean_reward > 0.0:
+                reward_text = '+' + reward_text
+            win_percent = int(
+                self._entry_win_counts[context_index] * 100.0 / sample_count + 0.5
+            )
+            summary = (
+                summary + ' ' + reward_text + 'R '
+                + str(win_percent) + '%'
+            )
+        penalty = self._entry_score_penalty(context_index)
+        if penalty > 0:
+            summary = summary + ' +' + str(penalty)
+        return summary
+
     def _select_exit_policy(self, regime_index: int) -> int:
         if regime_index < 0 or regime_index > 2:
             return 1
@@ -2524,6 +2557,17 @@ class Main(MainContext):
             + str(int(context_policy_samples)) + ' | ' + volatility_text
             + ' | ' + entry_learning_status
         )
+        entry_learning_summary = (
+            'SESSION LEARN (closed SIM: n, adjR, wins%; +score)\n'
+            + 'L: ' + self._entry_context_summary(0)
+            + ' | ' + self._entry_context_summary(1) + '\n'
+            + '   ' + self._entry_context_summary(2)
+            + ' | ' + self._entry_context_summary(3) + '\n'
+            + 'S: ' + self._entry_context_summary(4)
+            + ' | ' + self._entry_context_summary(5) + '\n'
+            + '   ' + self._entry_context_summary(6)
+            + ' | ' + self._entry_context_summary(7)
+        )
 
         entry_progress_pct = 0
         entry_progress_data = ''
@@ -2767,6 +2811,7 @@ class Main(MainContext):
             + 'POS: ' + sim_state_text + ' | ' + chat_mode_text + '\n'
             + chat_plot_text + '\n'
             + chat_policy_text + '\n'
+            + entry_learning_summary + '\n'
             + chat_risk_text
         )
         self._chat_label.text_color = color.rgba(235, 243, 255, 1.0)
