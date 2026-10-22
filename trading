@@ -274,6 +274,18 @@ class Main(MainContext):
             text_color=color.rgba(235, 243, 255, 1.0),
             font_size=11,
         )
+        self._tick_buy_caption_label = LabelRel(
+            '',
+            RelativePosition(
+                vertical_anchor=va.BOTTOM,
+                horizontal_anchor=ha.LEFT,
+                top_bottom_ratio=0.89,
+                left_right_ratio=0.55,
+            ),
+            bg_color=color.rgba(16, 28, 38, 0.92),
+            text_color=color.rgba(255, 255, 255, 1.0),
+            font_size=12,
+        )
         self._tick_buy_count_label = LabelRel(
             '',
             RelativePosition(
@@ -2052,7 +2064,6 @@ class Main(MainContext):
             + self._center_text_line(plan_text, tick_line_width) + '\n'
             + self._center_text_line(sim_pnl_label, tick_line_width) + '\n'
             + self._center_text_line(size_text, tick_line_width) + '\n'
-            + tick_buy_caption + '\n'
             + self._center_text_line(tick_average_text, tick_line_width)
         )
         self._analyst_label.text = analyst_text
@@ -2486,6 +2497,7 @@ class Main(MainContext):
         self._chat_label.text_color = color.rgba(235, 243, 255, 1.0)
 
         # Keep captions white; only the numeric buy/sell counters flash.
+        self._tick_buy_caption_label.text = tick_buy_caption
         self._tick_buy_count_label.text = tick_buy_count_text
         self._tick_sell_caption_label.text = tick_sell_caption
         self._tick_sell_count_label.text = tick_sell_count_text
@@ -2506,6 +2518,7 @@ class Main(MainContext):
         self.chart.draw(self._analyst_label)
         self.chart.draw(self._chat_label)
         self.chart.draw(self._progress_label)
+        self.chart.draw(self._tick_buy_caption_label)
         self.chart.draw(self._tick_buy_count_label)
         self.chart.draw(self._tick_sell_caption_label)
         self.chart.draw(self._tick_sell_count_label)
