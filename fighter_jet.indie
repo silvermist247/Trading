@@ -79,7 +79,7 @@ from indie.drawings import (
     color=color.rgba(0, 255, 0, 1.0),
     style=plot.marker_style.CIRCLE,
     position=plot.marker_position.CENTER,
-    size=7,
+    size=4,
     display_options=plot.MarkerDisplayOptions(
         pane=True, status_line=False, price_label=False,
     ),
@@ -89,7 +89,7 @@ from indie.drawings import (
     color=color.rgba(255, 0, 0, 1.0),
     style=plot.marker_style.CIRCLE,
     position=plot.marker_position.CENTER,
-    size=7,
+    size=4,
     display_options=plot.MarkerDisplayOptions(
         pane=True, status_line=False, price_label=False,
     ),
@@ -107,7 +107,7 @@ from indie.drawings import (
     color=color.rgba(0, 255, 0, 1.0),
     style=plot.marker_style.CIRCLE,
     position=plot.marker_position.CENTER,
-    size=7,
+    size=4,
     display_options=plot.MarkerDisplayOptions(
         pane=True, status_line=False, price_label=False,
     ),
@@ -117,7 +117,7 @@ from indie.drawings import (
     color=color.rgba(255, 0, 0, 1.0),
     style=plot.marker_style.CIRCLE,
     position=plot.marker_position.CENTER,
-    size=7,
+    size=4,
     display_options=plot.MarkerDisplayOptions(
         pane=True, status_line=False, price_label=False,
     ),
