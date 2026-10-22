@@ -15,7 +15,8 @@ from indie.drawings import (
 # Rule-based OHLCV paper simulator with small in-session entry/exit learners;
 # it is not a true AI service, durable learner, broker integration, or order system.
 # The entry learner only tightens future flat-entry score gates after poor simulated outcomes;
-# it does not change stops, risk sizing, full-MTF reversal safeguards, or place live orders.
+# optional fast mode lowers the flat-entry baseline by one point (floor 2) for more samples.
+# Stop/RR, risk sizing, cooldown, full-MTF reversal safeguards and live-order behavior are unchanged.
 # Run on a 1-minute chart: completed 1m candles are aggregated into 5m, 15m, 1h, and 4h bars.
 # Other chart intervals block entries. Full MTF warmup is about 84 hours; opportunity mode may
 # use a confirmed 5m trend after its EMA/ATR are ready, while higher frames warm up. MTF scores
@@ -40,6 +41,11 @@ from indie.drawings import (
 @param.float('min_reward_risk', default=1.5, min=0.5, max=4.0, step=0.1, title='Minimum estimated net reward/risk')
 @param.float('pullback_tolerance_atr', default=0.4, min=0.05, max=1.0, step=0.05, title='EMA pullback tolerance (ATR)')
 @param.int('minimum_entry_score', default=3, min=2, max=5, title='Minimum entry score (lower = more signals)')
+@param.bool(
+    'fast_learning_mode',
+    default=True,
+    title='Fast learning mode (one-point lower flat-entry score)',
+)
 @param.float('risk_per_trade_pct', default=0.25, min=0.05, max=1.0, step=0.05, title='Risk budget (% of equity)')
 @param.float('round_trip_cost_pct', default=0.0, min=0.0, max=2.0, step=0.05, title='Estimated round-trip costs (% notional; set broker estimate)')
 @param.float('account_equity_quote', default=0.0, min=0.0, max=1000000000.0, step=1.0, title='Optional equity in chart quote currency (0 simulates 1 unit)')
@@ -415,6 +421,12 @@ class Main(MainContext):
         self._sim_policy_counts[policy_slot] = (
             self._sim_policy_counts[policy_slot] + 1.0
         )
+
+    def _flat_entry_score(self, minimum_score: int, fast_mode: bool) -> int:
+        # Speed up outcome collection by one score point, but never below 2.
+        if fast_mode and minimum_score > 2:
+            return minimum_score - 1
+        return minimum_score
 
     def _record_entry_outcome(self, context_index: int, reward: float,
                               is_win: bool) -> None:
@@ -920,6 +932,7 @@ class Main(MainContext):
         min_reward_risk,
         pullback_tolerance_atr,
         minimum_entry_score,
+        fast_learning_mode,
         risk_per_trade_pct,
         round_trip_cost_pct,
         account_equity_quote,
@@ -931,6 +944,9 @@ class Main(MainContext):
         chart_chat_question,
     ):
         current_price = self.close[0]
+        flat_entry_min_score = self._flat_entry_score(
+            minimum_entry_score, fast_learning_mode,
+        )
         self._update_drawdown_state(account_equity_quote, max_drawdown_pct)
         new_sim_bar = self.bar_index != self._sim_bar_index
         if (self._mtf_trend_length != trend_length
@@ -1225,7 +1241,7 @@ class Main(MainContext):
             if (self.close[0] > prior_resistance
                     and self.close[1] <= resistance_two_bars_ago
                     and market_trending and ema_up
-                    and confluence >= minimum_entry_score
+                    and confluence >= flat_entry_min_score
                     and volume_ok and long_momentum_ok and bullish_candle
                     and current_price > fast_ema[0]
                     and current_price - prior_resistance <= atr_value * 0.75):
@@ -1238,7 +1254,7 @@ class Main(MainContext):
             if (self.close[0] < prior_support
                     and self.close[1] >= support_two_bars_ago
                     and market_trending and not ema_up
-                    and confluence <= -minimum_entry_score
+                    and confluence <= -flat_entry_min_score
                     and volume_ok and short_momentum_ok and bearish_candle
                     and current_price < fast_ema[0]
                     and prior_support - current_price <= atr_value * 0.75):
@@ -1292,14 +1308,14 @@ class Main(MainContext):
         long_opportunity_continuation = (
             opportunity_entries and partial_mtf_long_ok
             and market_trending and ema_up
-            and confluence >= minimum_entry_score
+            and confluence >= flat_entry_min_score
             and long_momentum_ok and volume_ok and bullish_confirmation
             and current_price > fast_ema[0] and long_room_ok
         )
         short_opportunity_continuation = (
             opportunity_entries and partial_mtf_short_ok
             and market_trending and not ema_up
-            and confluence <= -minimum_entry_score
+            and confluence <= -flat_entry_min_score
             and short_momentum_ok and volume_ok and bearish_confirmation
             and current_price < fast_ema[0] and short_room_ok
         )
@@ -1413,14 +1429,14 @@ class Main(MainContext):
         # directional close, momentum, room, and a valid stop/target plan.
         long_setup_candidate = False
         short_setup_candidate = False
-        if ((confluence >= minimum_entry_score and (near_support or long_ema_pullback)
+        if ((confluence >= flat_entry_min_score and (near_support or long_ema_pullback)
                 and not near_resistance and bullish_confirmation
                 and long_momentum_ok and long_room_ok)
                 or (long_breakout_retest and long_room_ok)
                 or (long_breakout_continuation and long_room_ok)
                 or long_opportunity_continuation):
             long_setup_candidate = True
-        if ((confluence <= -minimum_entry_score and (near_resistance or short_ema_pullback)
+        if ((confluence <= -flat_entry_min_score and (near_resistance or short_ema_pullback)
                 and not near_support and bearish_confirmation
                 and short_momentum_ok and short_room_ok)
                 or (short_breakdown_retest and short_room_ok)
@@ -1445,23 +1461,23 @@ class Main(MainContext):
             reverse_threshold = 5
         long_regime_ready = (
             mtf_long_ok and market_trending and ema_up
-            and confluence >= minimum_entry_score
+            and confluence >= flat_entry_min_score
             and long_risk_ok and long_room_ok
         ) or (
             opportunity_entries and partial_mtf_long_ok
             and market_trending and ema_up
-            and confluence >= minimum_entry_score
+            and confluence >= flat_entry_min_score
             and long_momentum_ok and volume_ok
             and long_risk_ok and long_room_ok
         )
         short_regime_ready = (
             mtf_short_ok and market_trending and not ema_up
-            and confluence <= -minimum_entry_score
+            and confluence <= -flat_entry_min_score
             and short_risk_ok and short_room_ok
         ) or (
             opportunity_entries and partial_mtf_short_ok
             and market_trending and not ema_up
-            and confluence <= -minimum_entry_score
+            and confluence <= -flat_entry_min_score
             and short_momentum_ok and volume_ok
             and short_risk_ok and short_room_ok
         )
@@ -1487,8 +1503,8 @@ class Main(MainContext):
         short_entry_penalty = self._entry_score_penalty(short_entry_context)
         long_learning_blocked = False
         short_learning_blocked = False
-        long_learning_min_score = minimum_entry_score + long_entry_penalty
-        short_learning_min_score = minimum_entry_score + short_entry_penalty
+        long_learning_min_score = flat_entry_min_score + long_entry_penalty
+        short_learning_min_score = flat_entry_min_score + short_entry_penalty
         # Only fresh flat-entry eligibility is tightened; reversal safeguards stay intact.
         if (self._sim_side == 0 and long_entry_penalty > 0
                 and (long_candidate or long_regime_ready)
@@ -1872,13 +1888,13 @@ class Main(MainContext):
             scenario_text = 'BREAKOUT: wait retest'
         elif downside_breakdown:
             scenario_text = 'BREAKDOWN: wait retest'
-        elif confluence >= 3 and near_support:
+        elif confluence >= flat_entry_min_score and near_support:
             scenario_text = 'SUP: quality filter'
-        elif confluence <= -3 and near_resistance:
+        elif confluence <= -flat_entry_min_score and near_resistance:
             scenario_text = 'RES: quality filter'
-        elif confluence >= 3:
+        elif confluence >= flat_entry_min_score:
             scenario_text = 'BULLISH: wait pullback'
-        elif confluence <= -3:
+        elif confluence <= -flat_entry_min_score:
             scenario_text = 'BEARISH: wait rally'
         if long_setup_candidate and not long_risk_ok:
             scenario_text = 'RISK FILTER: stop/RR'
@@ -2552,10 +2568,13 @@ class Main(MainContext):
                     entry_learning_status + ' +'
                     + str(entry_learning_penalty)
                 )
+        entry_score_mode = 'BASE'
+        if flat_entry_min_score < minimum_entry_score:
+            entry_score_mode = 'FAST -1'
         chat_policy_text = (
             'EXIT ' + active_policy_name + ' | N'
             + str(int(context_policy_samples)) + ' | ' + volatility_text
-            + ' | ' + entry_learning_status
+            + ' | ' + entry_score_mode + ' | ' + entry_learning_status
         )
         entry_learning_summary = (
             'SESSION LEARN (closed SIM: n, adjR, wins%; +score)\n'
@@ -2640,11 +2659,11 @@ class Main(MainContext):
             if mtf_ready or mtf_5m_partial_ready:
                 local_long_read = (
                     market_trending and ema_up
-                    and confluence >= minimum_entry_score
+                    and confluence >= flat_entry_min_score
                 )
                 local_short_read = (
                     market_trending and not ema_up
-                    and confluence <= -minimum_entry_score
+                    and confluence <= -flat_entry_min_score
                 )
                 if market_trending:
                     entry_progress_pct = entry_progress_pct + 10
