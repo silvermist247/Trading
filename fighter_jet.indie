@@ -1865,8 +1865,7 @@ class Main(MainContext):
             + mtf_text + '\n'
             + 'BB L/U ' + band_text + ' | RSI ' + rsi_display + '\n'
             + volume_short + ' | ' + scenario_text + '\n'
-            + sim_summary + '\n'
-            + 'L/S trader counts: unavailable'
+            + sim_summary
         )
 
         support_color = color.rgba(0, 180, 0, 1.0)
@@ -2045,8 +2044,7 @@ class Main(MainContext):
             + volume_reason + ' ' + candle_reason
         )
         analyst_text = (
-            self._center_text_line('RULE SIM | NO LIVE ORDERS', tick_line_width) + '\n'
-            + self._center_text_line(
+            self._center_text_line(
                 'STATE: ' + sim_state_text + ' | ' + signal_name,
                 tick_line_width,
             ) + '\n'
@@ -2483,8 +2481,7 @@ class Main(MainContext):
             + 'POS: ' + sim_state_text + ' | ' + chat_mode_text + '\n'
             + chat_plot_text + '\n'
             + chat_policy_text + '\n'
-            + chat_risk_text + '\n'
-            + 'SIM ONLY | NO LIVE ORDERS'
+            + chat_risk_text
         )
         self._chat_label.text_color = color.rgba(235, 243, 255, 1.0)
 
