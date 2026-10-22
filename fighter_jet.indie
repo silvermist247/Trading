@@ -72,11 +72,11 @@ from indie.drawings import (
     id='ema_down', title='EMA downtrend',
     color=color.rgba(255, 0, 255, 1.0), line_width=2,
 )
-@plot.steps(
+@plot.line(
     id='support_level', title='Dynamic rolling support',
     color=color.rgba(0, 180, 0, 1.0), line_width=2,
 )
-@plot.steps(
+@plot.line(
     id='resistance_level', title='Dynamic rolling resistance',
     color=color.rgba(255, 0, 180, 1.0), line_width=2,
 )
@@ -279,12 +279,12 @@ class Main(MainContext):
             RelativePosition(
                 vertical_anchor=va.TOP,
                 horizontal_anchor=ha.LEFT,
-                top_bottom_ratio=0.02,
-                left_right_ratio=0.56,
+                top_bottom_ratio=0.06,
+                left_right_ratio=0.52,
             ),
             bg_color=color.rgba(12, 20, 31, 0.96),
             text_color=color.rgba(235, 243, 255, 1.0),
-            font_size=12,
+            font_size=10,
         )
         self._progress_label = LabelRel(
             '',
@@ -1027,8 +1027,8 @@ class Main(MainContext):
             volume_ready = True
             volume_ok = self.volume[0] > volume_reference
 
-        # Horizontal rolling S/R step lines recalculate from price data every update.
-        # On the live bar they may move intrabar as its low/high extends; they settle at close.
+        # Dynamic horizontal S/R lines recalculate from rolling lows/highs each update.
+        # The active bar can move a level intrabar as its low/high extends; it settles at close.
         support = nan
         resistance = nan
         prior_support = nan
@@ -2236,9 +2236,26 @@ class Main(MainContext):
         )
         self._analyst_label.text = analyst_text
 
+        chat_market_text = 'RANGE'
+        if market_trending:
+            if ema_up:
+                chat_market_text = 'UP'
+            else:
+                chat_market_text = 'DOWN'
+        chat_mtf_status = 'MTF WAIT'
+        if mtf_status == 'PARTIAL 5m':
+            chat_mtf_status = '5m PART'
+        elif mtf_status == 'WARMUP':
+            chat_mtf_status = 'MTF WARM'
+        elif mtf_status == 'NEEDS 1M':
+            chat_mtf_status = 'NEED 1m'
+        elif mtf_status == 'BUY OK':
+            chat_mtf_status = 'MTF BUY'
+        elif mtf_status == 'SELL OK':
+            chat_mtf_status = 'MTF SELL'
         chat_answer = (
-            market_text + ' | MTF ' + mtf_status
-            + ' | SCORE ' + confluence_text + ' | RSI ' + rsi_display
+            chat_market_text + ' | ' + chat_mtf_status
+            + ' | SC ' + confluence_text + ' | RSI ' + rsi_display
         )
         if chart_chat_question == 'Why holding?':
             if self._sim_side > 0:
@@ -2364,104 +2381,100 @@ class Main(MainContext):
             chat_action_text = 'WAIT: 5m/higher MTF conflict'
         elif not mtf_ready and opportunity_entries:
             if mtf_5m_partial_ready:
-                chat_action_text = 'WAIT: 5m scan; no 1m trigger'
+                chat_action_text = 'WAIT: 1m trigger'
             else:
-                chat_action_text = 'WAIT: 5m confirmation warming'
+                chat_action_text = 'WAIT: 5m warm-up'
         elif not mtf_ready:
             chat_action_text = 'WAIT: full MTF warm-up (~84h)'
 
         # Recomputed each live update; deterministic narration can change intrabar with the rule gates.
         chat_thought_text = (
-            'No qualified setup near ' + price_text + '; I am waiting.'
+            'No setup near ' + price_text + '; waiting.'
         )
         if self._sim_risk_locked:
-            chat_thought_text = 'I would stay flat; the drawdown lock is active.'
+            chat_thought_text = 'Drawdown lock active; stay flat.'
         elif not self._mtf_chart_is_1m:
-            chat_thought_text = 'I am waiting for the required 1m chart.'
+            chat_thought_text = 'Need a 1m chart.'
         elif self._sim_side > 0:
             if self._pending_side < 0:
                 chat_thought_text = (
-                    'I am watching SHORT near ' + price_text
-                    + '; reversal is unconfirmed.'
+                    'Watching SHORT near ' + price_text
+                    + '; reversal not confirmed.'
                 )
             else:
                 chat_thought_text = (
-                    'I am managing SIM LONG from '
+                    'SIM LONG from '
                     + str(round(self._sim_entry_price, price_precision))
-                    + '; stop/TP apply.'
+                    + '; stop/TP active.'
                 )
         elif self._sim_side < 0:
             if self._pending_side > 0:
                 chat_thought_text = (
-                    'I am watching BUY near ' + price_text
-                    + '; reversal is unconfirmed.'
+                    'Watching BUY near ' + price_text
+                    + '; reversal not confirmed.'
                 )
             else:
                 chat_thought_text = (
-                    'I am managing SIM SHORT from '
+                    'SIM SHORT from '
                     + str(round(self._sim_entry_price, price_precision))
-                    + '; stop/TP apply.'
+                    + '; stop/TP active.'
                 )
         elif self._pending_side > 0:
             chat_thought_text = (
-                'I may SIM BUY near ' + price_text
-                + '; next-open check pending.'
+                'SIM BUY near ' + price_text + '; next-open check.'
             )
         elif self._pending_side < 0:
             chat_thought_text = (
-                'I may SIM SHORT near ' + price_text
-                + '; next-open check pending.'
+                'SIM SHORT near ' + price_text + '; next-open check.'
             )
         elif self.bar_index < self._sim_cooldown_until_bar:
-            chat_thought_text = 'I am waiting for the post-exit cooldown to end.'
+            chat_thought_text = 'Post-exit cooldown.'
         elif long_candidate:
             chat_thought_text = (
-                'I am considering SIM BUY near ' + price_text
-                + ' if gates pass.'
+                'SIM BUY near ' + price_text + '; checking gates.'
             )
         elif short_candidate:
             chat_thought_text = (
-                'I am considering SIM SHORT near ' + price_text
-                + ' if gates pass.'
+                'SIM SHORT near ' + price_text + '; checking gates.'
             )
         elif long_setup_candidate and not long_risk_ok:
             chat_thought_text = (
-                'A BUY near ' + price_text + ' fails stop/RR; I am waiting.'
+                'BUY fails stop/RR near ' + price_text + '.'
             )
         elif short_setup_candidate and not short_risk_ok:
             chat_thought_text = (
-                'A SHORT near ' + price_text + ' fails stop/RR; I am waiting.'
+                'SHORT fails stop/RR near ' + price_text + '.'
             )
         elif long_mtf_blocked:
             chat_thought_text = (
-                'A BUY near ' + price_text + ' is MTF-blocked; I am waiting.'
+                'BUY blocked by MTF near ' + price_text + '.'
             )
         elif short_mtf_blocked:
             chat_thought_text = (
-                'A SHORT near ' + price_text + ' is MTF-blocked; I am waiting.'
+                'SHORT blocked by MTF near ' + price_text + '.'
             )
         elif long_learning_blocked:
             chat_thought_text = (
-                'I am raising BUY score to '
-                + str(long_learning_min_score) + ' after weak SIM outcomes.'
+                'Weak SIM results; BUY score now '
+                + str(long_learning_min_score) + '.'
             )
         elif short_learning_blocked:
             chat_thought_text = (
-                'I am raising SHORT score to '
-                + str(short_learning_min_score) + ' after weak SIM outcomes.'
+                'Weak SIM results; SHORT score now '
+                + str(short_learning_min_score) + '.'
             )
         elif not mtf_ready and opportunity_entries:
             if mtf_5m_partial_ready:
                 chat_thought_text = (
-                    'I am waiting for a 1m trigger; 5m trend is ready.'
+                    '5m ready; waiting for 1m trigger.'
                 )
             else:
                 chat_thought_text = (
-                    'I am waiting for 5m data before considering an entry.'
+                    'Waiting for 5m data.'
                 )
         elif not mtf_ready:
             chat_thought_text = (
-                'I am waiting for MTF history before considering an entry.'
+                'Waiting for full MTF history.'
             )
         elif long_regime_ready:
             chat_thought_text = (
@@ -2482,46 +2495,46 @@ class Main(MainContext):
                 'I am watching SHORT near ' + price_text + '; no trigger yet.'
             )
 
-        chat_plot_text = 'TRADE PLOTS: NONE (NO SIM FILL)'
+        chat_plot_text = 'SIM PLOTS: NONE'
         if self._sim_side > 0:
             chat_plot_text = (
-                'TRADE PLOTS: SL ' + str(round(self._sim_stop, price_precision))
+                'SIM SL ' + str(round(self._sim_stop, price_precision))
                 + ' | TP ' + str(round(self._sim_target, price_precision))
             )
         elif self._sim_side < 0:
             chat_plot_text = (
-                'TRADE PLOTS: SL ' + str(round(self._sim_stop, price_precision))
+                'SIM SL ' + str(round(self._sim_stop, price_precision))
                 + ' | TP ' + str(round(self._sim_target, price_precision))
             )
         elif self._pending_side > 0:
             chat_plot_text = (
-                'TRADE PLAN: BUY SL ' + str(round(self._pending_stop, price_precision))
+                'SIM BUY SL ' + str(round(self._pending_stop, price_precision))
                 + ' | TP ' + str(round(self._pending_target, price_precision))
             )
         elif self._pending_side < 0:
             chat_plot_text = (
-                'TRADE PLAN: SELL SL ' + str(round(self._pending_stop, price_precision))
+                'SIM SELL SL ' + str(round(self._pending_stop, price_precision))
                 + ' | TP ' + str(round(self._pending_target, price_precision))
             )
         elif self._sim_exit_event_bar == self.bar_index:
             if self._sim_exit_event_type == 1:
                 chat_plot_text = (
-                    'TRADE EXIT: TP HIT @ '
+                    'SIM TP @ '
                     + str(round(self._sim_exit_event_price, price_precision))
                 )
             elif self._sim_exit_event_type == -1:
                 chat_plot_text = (
-                    'TRADE EXIT: SL HIT @ '
+                    'SIM SL @ '
                     + str(round(self._sim_exit_event_price, price_precision))
                 )
             elif self._sim_exit_event_type == -2:
                 chat_plot_text = (
-                    'TRADE EXIT: DD LOCK @ '
+                    'SIM DD @ '
                     + str(round(self._sim_exit_event_price, price_precision))
                 )
             elif self._sim_exit_event_type == 2:
                 chat_plot_text = (
-                    'TRADE EXIT: REV @ '
+                    'SIM REV @ '
                     + str(round(self._sim_exit_event_price, price_precision))
                 )
 
@@ -2573,13 +2586,20 @@ class Main(MainContext):
         entry_score_mode = 'BASE'
         if flat_entry_min_score < minimum_entry_score:
             entry_score_mode = 'FAST -1'
+        entry_learning_total_count = 0
+        for entry_context_counter in range(8):
+            entry_learning_total_count = (
+                entry_learning_total_count
+                + int(self._entry_outcome_counts[entry_context_counter])
+            )
         chat_policy_text = (
-            'EXIT ' + active_policy_name + ' | N'
+            'EXIT ' + active_policy_name + ' N'
             + str(int(context_policy_samples)) + ' | ' + volatility_text
             + ' | ' + entry_score_mode + ' | ' + entry_learning_status
         )
         entry_learning_summary = (
-            'SESSION LEARN (closed SIM: n, adjR, wins%; +score)\n'
+            'LEARN SIM n' + str(entry_learning_total_count)
+            + ' | closed: adjR, win%; +gate\n'
             + 'L: ' + self._entry_context_summary(0)
             + ' | ' + self._entry_context_summary(1) + '\n'
             + '   ' + self._entry_context_summary(2)
@@ -2824,12 +2844,11 @@ class Main(MainContext):
         )
 
         self._chat_label.text = (
-            'JET CHAT | RULE-BASED\n'
-            + 'Q: ' + chart_chat_question + '\n'
+            'SIM RULES | ' + chart_chat_question + '\n'
             + 'READ: ' + chat_answer + '\n'
             + 'THINK: ' + chat_thought_text + '\n'
             + 'ACTION: ' + chat_action_text + '\n'
-            + 'POS: ' + sim_state_text + ' | ' + chat_mode_text + '\n'
+            + 'SIM POS: ' + sim_state_text + ' | ' + chat_mode_text + '\n'
             + chat_plot_text + '\n'
             + chat_policy_text + '\n'
             + entry_learning_summary + '\n'
