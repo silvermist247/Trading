@@ -12,16 +12,18 @@ from indie.drawings import (
 )
 
 
-# Rule-based OHLCV paper simulator with a small in-memory contextual outcome selector;
-# it is not an AI service, durable learner, broker integration, or order system.
+# Rule-based OHLCV paper simulator with small in-session entry/exit learners;
+# it is not a true AI service, durable learner, broker integration, or order system.
+# The entry learner only tightens future flat-entry score gates after poor simulated outcomes;
+# it does not change stops, risk sizing, full-MTF reversal safeguards, or place live orders.
 # Run on a 1-minute chart: completed 1m candles are aggregated into 5m, 15m, 1h, and 4h bars.
 # Other chart intervals block entries. Full MTF warmup is about 84 hours; opportunity mode may
 # use a confirmed 5m trend after its EMA/ATR are ready, while higher frames warm up. MTF scores
 # use completed bars; 1m conditions can change intrabar.
 # Higher-timeframe volume is the chart's volume field (possibly tick volume), not trader counts.
 # Pending signals are rechecked at the next 1m open. Stop/TP hits use candle ranges; if both
-# are touched in one bar, the simulator assumes the stop hit first. Exits/policy rewards reset
-# when the indicator runtime is reinitialized; they are not exported or stored durably.
+# are touched in one bar, the simulator assumes the stop hit first. In-session entry/exit
+# learning state resets when the indicator runtime is reinitialized; it is not durable.
 # Equity is optional: without it, trades use one simulated unit and percent risk/drawdown caps
 # cannot be calculated. No live orders are placed. Costs are estimates; actual execution differs.
 @indicator('Fighter-Jet Radar - Paper Trade Simulator', overlay_main_pane=True)
@@ -159,7 +161,9 @@ class Main(MainContext):
         self._pending_stop = nan
         self._pending_target = nan
         self._pending_max_stop_distance = nan
+        self._pending_entry_context = -1
         self._sim_side = 0
+        self._sim_entry_context = -1
         self._sim_entry_price = nan
         self._sim_entry_time = nan
         self._sim_stop = nan
@@ -197,6 +201,20 @@ class Main(MainContext):
         ]
         self._sim_policy_counts = [
             0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0,
+        ]
+        # In-session outcomes by entry archetype: four LONG, then four SHORT.
+        self._entry_reward_sums = [
+            0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0,
+        ]
+        self._entry_win_counts = [
+            0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0,
+        ]
+        self._entry_outcome_counts = [
+            0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0,
+        ]
+        self._entry_context_labels = [
+            'L/PULL', 'L/BRK', 'L/5M', 'L/REG',
+            'S/PULL', 'S/BRK', 'S/5M', 'S/REG',
         ]
         self._sim_policy_attempts = [0, 0, 0]
         self._sim_policy_last_bar = [-1, -1, -1]
@@ -398,6 +416,41 @@ class Main(MainContext):
             self._sim_policy_counts[policy_slot] + 1.0
         )
 
+    def _record_entry_outcome(self, context_index: int, reward: float,
+                              is_win: bool) -> None:
+        if context_index < 0 or context_index > 7:
+            return
+        self._entry_reward_sums[context_index] = (
+            self._entry_reward_sums[context_index] + reward
+        )
+        self._entry_outcome_counts[context_index] = (
+            self._entry_outcome_counts[context_index] + 1.0
+        )
+        if is_win:
+            self._entry_win_counts[context_index] = (
+                self._entry_win_counts[context_index] + 1.0
+            )
+
+    def _entry_score_penalty(self, context_index: int) -> int:
+        if context_index < 0 or context_index > 7:
+            return 0
+        sample_count = self._entry_outcome_counts[context_index]
+        if sample_count < 8.0:
+            return 0
+        # Eight outcomes unlock mild tightening; twelve allow a second step only
+        # for severe weakness. Positive results never loosen safeguards.
+        mean_reward = self._entry_reward_sums[context_index] / (sample_count + 5.0)
+        win_rate = (
+            (self._entry_win_counts[context_index] + 2.0)
+            / (sample_count + 4.0)
+        )
+        if (sample_count >= 12.0 and mean_reward <= -0.25
+                and win_rate < 0.35):
+            return 2
+        if mean_reward <= -0.12 and win_rate < 0.45:
+            return 1
+        return 0
+
     def _select_exit_policy(self, regime_index: int) -> int:
         if regime_index < 0 or regime_index > 2:
             return 1
@@ -490,6 +543,11 @@ class Main(MainContext):
                 self._sim_policy_index,
                 self._sim_last_reward,
             )
+            self._record_entry_outcome(
+                self._sim_entry_context,
+                self._sim_last_reward,
+                self._sim_last_net_r > 0.0,
+            )
 
         self._sim_exit_event_bar = self.bar_index
         self._sim_exit_event_type = exit_type
@@ -525,6 +583,7 @@ class Main(MainContext):
         self._sim_target = nan
         self._sim_units = 0.0
         self._sim_initial_risk_per_unit = nan
+        self._sim_entry_context = -1
 
     def _center_text_line(self, text: str, width: int) -> str:
         padding_count = int((width - len(text)) / 2.0)
@@ -1373,6 +1432,44 @@ class Main(MainContext):
             and short_momentum_ok and volume_ok
             and short_risk_ok and short_room_ok
         )
+
+        # Bucket fresh entry outcomes by side and setup archetype.
+        long_entry_pattern = 3
+        if long_opportunity_continuation:
+            long_entry_pattern = 2
+        elif long_breakout_retest or long_breakout_continuation:
+            long_entry_pattern = 1
+        elif long_setup_candidate:
+            long_entry_pattern = 0
+        short_entry_pattern = 3
+        if short_opportunity_continuation:
+            short_entry_pattern = 2
+        elif short_breakdown_retest or short_breakdown_continuation:
+            short_entry_pattern = 1
+        elif short_setup_candidate:
+            short_entry_pattern = 0
+        long_entry_context = long_entry_pattern
+        short_entry_context = 4 + short_entry_pattern
+        long_entry_penalty = self._entry_score_penalty(long_entry_context)
+        short_entry_penalty = self._entry_score_penalty(short_entry_context)
+        long_learning_blocked = False
+        short_learning_blocked = False
+        long_learning_min_score = minimum_entry_score + long_entry_penalty
+        short_learning_min_score = minimum_entry_score + short_entry_penalty
+        # Only fresh flat-entry eligibility is tightened; reversal safeguards stay intact.
+        if (self._sim_side == 0 and long_entry_penalty > 0
+                and (long_candidate or long_regime_ready)
+                and confluence < long_learning_min_score):
+            long_candidate = False
+            long_regime_ready = False
+            long_learning_blocked = True
+        if (self._sim_side == 0 and short_entry_penalty > 0
+                and (short_candidate or short_regime_ready)
+                and confluence > -short_learning_min_score):
+            short_candidate = False
+            short_regime_ready = False
+            short_learning_blocked = True
+
         long_reverse_candidate = (
             mtf_long_ok and market_trending and ema_up
             and confluence >= reverse_threshold
@@ -1410,12 +1507,14 @@ class Main(MainContext):
             pending_max_stop_distance = self._pending_max_stop_distance
             pending_policy_index = self._pending_policy_index
             pending_regime_index = self._pending_regime_index
+            pending_entry_context = self._pending_entry_context
             self._pending_side = 0
             self._pending_stop = nan
             self._pending_target = nan
             self._pending_max_stop_distance = nan
             self._pending_policy_index = 1
             self._pending_regime_index = 0
+            self._pending_entry_context = -1
 
             # Policy 2 trails only after the previous completed candle has moved
             # at least one initial R in favor. The stop can only tighten.
@@ -1568,6 +1667,7 @@ class Main(MainContext):
                     self._sim_initial_risk_per_unit = entry_risk_per_unit
                     self._sim_policy_index = pending_policy_index
                     self._sim_regime_index = pending_regime_index
+                    self._sim_entry_context = pending_entry_context
                     self._sim_trade_count = self._sim_trade_count + 1
                     self._sim_entry_event_bar = self.bar_index
                     self._sim_entry_event_side = pending_side
@@ -1629,6 +1729,7 @@ class Main(MainContext):
         next_pending_stop = nan
         next_pending_target = nan
         next_pending_max_stop_distance = nan
+        next_pending_entry_context = -1
         if (self._sim_exit_event_bar != self.bar_index
                 and not self._sim_risk_locked
                 and self.bar_index >= self._sim_cooldown_until_bar):
@@ -1640,10 +1741,12 @@ class Main(MainContext):
                         next_pending_side = 1
                         next_pending_stop = long_stop_value
                         next_pending_target = long_target_value
+                        next_pending_entry_context = long_entry_context
                     elif next_short_ready and not next_long_ready:
                         next_pending_side = -1
                         next_pending_stop = short_stop_value
                         next_pending_target = short_target_value
+                        next_pending_entry_context = short_entry_context
                 elif self._sim_side > 0 and short_reverse_candidate:
                     next_pending_side = -1
                     next_pending_stop = short_stop_value
@@ -1657,10 +1760,12 @@ class Main(MainContext):
                     next_pending_side = 1
                     next_pending_stop = long_stop_value
                     next_pending_target = long_target_value
+                    next_pending_entry_context = long_entry_context
                 elif short_candidate and not long_candidate:
                     next_pending_side = -1
                     next_pending_stop = short_stop_value
                     next_pending_target = short_target_value
+                    next_pending_entry_context = short_entry_context
 
         if next_pending_side != 0:
             self._pending_side = next_pending_side
@@ -1669,6 +1774,7 @@ class Main(MainContext):
             self._pending_max_stop_distance = atr_value * max_stop_atr
             self._pending_policy_index = selected_policy_index
             self._pending_regime_index = regime_index
+            self._pending_entry_context = next_pending_entry_context
         else:
             self._pending_side = 0
             self._pending_stop = nan
@@ -1676,6 +1782,7 @@ class Main(MainContext):
             self._pending_max_stop_distance = nan
             self._pending_policy_index = 1
             self._pending_regime_index = 0
+            self._pending_entry_context = -1
 
         if self._sim_entry_event_bar == self.bar_index:
             if self._sim_entry_event_side > 0:
@@ -1746,6 +1853,8 @@ class Main(MainContext):
             scenario_text = 'RISK FILTER: stop/RR'
         elif long_mtf_blocked or short_mtf_blocked:
             scenario_text = 'MTF FILTER: WAIT ALIGNMENT'
+        elif long_learning_blocked or short_learning_blocked:
+            scenario_text = 'ENTRY LEARN: SCORE FILTER'
         elif not risk_ready and not long_candidate and not short_candidate:
             scenario_text = 'SIM: 1 UNIT'
         if self._sim_risk_locked:
@@ -1938,6 +2047,10 @@ class Main(MainContext):
             signal_name = 'BUY MTF BLOCK'
         elif short_mtf_blocked:
             signal_name = 'SELL MTF BLOCK'
+        elif long_learning_blocked:
+            signal_name = 'BUY LEARN FILTER'
+        elif short_learning_blocked:
+            signal_name = 'SELL LEARN FILTER'
         elif long_setup_candidate:
             signal_name = 'BUY BLOCKED'
         elif short_setup_candidate:
@@ -1988,6 +2101,10 @@ class Main(MainContext):
             plan_text = 'BUY BLOCKED: STOP/RR FILTER'
         elif short_setup_candidate and not short_risk_ok:
             plan_text = 'SELL BLOCKED: STOP/RR FILTER'
+        elif long_learning_blocked:
+            plan_text = 'WAIT: ENTRY LEARN BUY SCORE FILTER'
+        elif short_learning_blocked:
+            plan_text = 'WAIT: ENTRY LEARN SELL SCORE FILTER'
 
         cost_text = 'COST ' + str(round(round_trip_cost_pct, 2)) + '%'
         size_text = 'SIM 1 UNIT | ' + cost_text
@@ -2144,6 +2261,10 @@ class Main(MainContext):
                 chat_answer = 'WAIT: long risk/RR gate'
             elif short_setup_candidate and not short_risk_ok:
                 chat_answer = 'WAIT: short risk/RR gate'
+            elif long_learning_blocked:
+                chat_answer = 'WAIT: learned BUY score filter'
+            elif short_learning_blocked:
+                chat_answer = 'WAIT: learned SELL score filter'
             elif long_mtf_blocked or short_mtf_blocked:
                 chat_answer = 'WAIT: MTF alignment'
             else:
@@ -2184,6 +2305,10 @@ class Main(MainContext):
             chat_action_text = 'WAIT: long risk/RR gate'
         elif short_setup_candidate and not short_risk_ok:
             chat_action_text = 'WAIT: short risk/RR gate'
+        elif long_learning_blocked:
+            chat_action_text = 'WAIT: learned BUY score filter'
+        elif short_learning_blocked:
+            chat_action_text = 'WAIT: learned SELL score filter'
         elif long_mtf_blocked or short_mtf_blocked:
             chat_action_text = 'WAIT: 5m/higher MTF conflict'
         elif not mtf_ready and opportunity_entries:
@@ -2263,6 +2388,16 @@ class Main(MainContext):
         elif short_mtf_blocked:
             chat_thought_text = (
                 'A SHORT near ' + price_text + ' is MTF-blocked; I am waiting.'
+            )
+        elif long_learning_blocked:
+            chat_thought_text = (
+                'I am raising BUY score to '
+                + str(long_learning_min_score) + ' after weak SIM outcomes.'
+            )
+        elif short_learning_blocked:
+            chat_thought_text = (
+                'I am raising SHORT score to '
+                + str(short_learning_min_score) + ' after weak SIM outcomes.'
             )
         elif not mtf_ready and opportunity_entries:
             if mtf_5m_partial_ready:
@@ -2356,9 +2491,38 @@ class Main(MainContext):
         volatility_text = 'VOL OK'
         if high_volatility:
             volatility_text = 'HIGH VOL'
+        entry_learning_display_context = -1
+        if self._pending_entry_context >= 0:
+            entry_learning_display_context = self._pending_entry_context
+        elif self._sim_entry_context >= 0:
+            entry_learning_display_context = self._sim_entry_context
+        elif (long_learning_blocked or long_candidate or long_regime_ready
+                or long_setup_candidate):
+            entry_learning_display_context = long_entry_context
+        elif (short_learning_blocked or short_candidate or short_regime_ready
+                or short_setup_candidate):
+            entry_learning_display_context = short_entry_context
+        entry_learning_status = 'ENTRY SCAN'
+        if entry_learning_display_context >= 0:
+            entry_learning_count = int(
+                self._entry_outcome_counts[entry_learning_display_context]
+            )
+            entry_learning_penalty = self._entry_score_penalty(
+                entry_learning_display_context
+            )
+            entry_learning_status = (
+                'ENTRY ' + self._entry_context_labels[entry_learning_display_context]
+                + ' ' + str(entry_learning_count) + '/8'
+            )
+            if entry_learning_penalty > 0:
+                entry_learning_status = (
+                    entry_learning_status + ' +'
+                    + str(entry_learning_penalty)
+                )
         chat_policy_text = (
             'EXIT ' + active_policy_name + ' | N'
             + str(int(context_policy_samples)) + ' | ' + volatility_text
+            + ' | ' + entry_learning_status
         )
 
         entry_progress_pct = 0
@@ -2543,6 +2707,14 @@ class Main(MainContext):
                     self._sim_reverse_confirm_count * 90.0 / reverse_confirm_bars
                 )
 
+        if long_learning_blocked:
+            buy_readiness_pct = buy_readiness_pct - 15
+        if short_learning_blocked:
+            sell_readiness_pct = sell_readiness_pct - 15
+        if buy_readiness_pct < 0:
+            buy_readiness_pct = 0
+        if sell_readiness_pct < 0:
+            sell_readiness_pct = 0
         if buy_readiness_pct > 100:
             buy_readiness_pct = 100
         if sell_readiness_pct > 100:
