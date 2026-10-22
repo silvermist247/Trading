@@ -25,6 +25,7 @@ from indie.drawings import (
 # Pending signals are rechecked at the next 1m open. Stop/TP hits use candle ranges; if both
 # are touched in one bar, the simulator assumes the stop hit first. In-session entry/exit
 # learning state resets when the indicator runtime is reinitialized; it is not durable.
+# Swing-reversal candidates approximate local OHLCV/RSI turns; manual chart drawings are not inputs.
 # Equity is optional: without it, trades use one simulated unit and percent risk/drawdown caps
 # cannot be calculated. No live orders are placed. Costs are estimates; actual execution differs.
 @indicator('Fighter-Jet Radar - Paper Trade Simulator', overlay_main_pane=True)
@@ -32,6 +33,8 @@ from indie.drawings import (
 @param.int('radar_length', default=14, min=1, max=250, title='ATR length')
 @param.int('volume_sma', default=20, min=1, max=500, title='Volume baseline lookback (bars)')
 @param.int('level_lookback', default=10, min=2, max=500, title='Support / resistance lookback (bars)')
+@param.int('swing_proxy_lookback', default=5, min=3, max=30, title='Swing-reversal proxy lookback (bars)')
+@param.float('swing_proxy_tolerance_atr', default=0.25, min=0.05, max=0.75, step=0.05, title='Swing-reversal level tolerance (ATR)')
 @param.int('band_length', default=20, min=2, max=250, title='Bollinger length')
 @param.float('band_multiplier', default=2.0, min=0.5, max=4.0, step=0.1, title='Bollinger deviation')
 @param.int('rsi_length', default=14, min=2, max=250, title='RSI length')
@@ -923,6 +926,8 @@ class Main(MainContext):
         radar_length,
         volume_sma,
         level_lookback,
+        swing_proxy_lookback,
+        swing_proxy_tolerance_atr,
         band_length,
         band_multiplier,
         rsi_length,
@@ -1033,8 +1038,15 @@ class Main(MainContext):
         resistance = nan
         prior_support = nan
         prior_resistance = nan
+        prior_swing_support = nan
+        prior_swing_resistance = nan
         resistance_two_bars_ago = nan
         support_two_bars_ago = nan
+        if len(self.close) >= swing_proxy_lookback + 1:
+            swing_low_series = Lowest.new(self.low, swing_proxy_lookback)
+            swing_high_series = Highest.new(self.high, swing_proxy_lookback)
+            prior_swing_support = swing_low_series[1]
+            prior_swing_resistance = swing_high_series[1]
         if len(self.close) >= level_lookback:
             low_series = Lowest.new(self.low, level_lookback)
             high_series = Highest.new(self.high, level_lookback)
@@ -1059,8 +1071,12 @@ class Main(MainContext):
             bb_upper = bb_upper_series[0]
 
         rsi_value = nan
+        rsi_previous = nan
         if len(self.close) >= rsi_length:
-            rsi_value = Rsi.new(self.close, rsi_length)[0]
+            rsi_series = Rsi.new(self.close, rsi_length)
+            rsi_value = rsi_series[0]
+            if len(self.close) >= rsi_length + 1:
+                rsi_previous = rsi_series[1]
 
         market_trending = False
         if atr_value > 0:
@@ -1220,6 +1236,29 @@ class Main(MainContext):
             if rsi_value >= 25.0 and rsi_value <= 55.0:
                 short_momentum_ok = True
 
+        # Approximate a hand-drawn swing arrow with a local level retest/reclaim,
+        # a confirming candle, and a one-bar RSI turn. This does not read chart drawings.
+        long_swing_proxy = False
+        short_swing_proxy = False
+        if (atr_value > 0.0 and not isnan(prior_swing_support)
+                and not isnan(rsi_value) and not isnan(rsi_previous)
+                and bullish_confirmation and rsi_value > rsi_previous
+                and rsi_value <= 65.0):
+            swing_tolerance = atr_value * swing_proxy_tolerance_atr
+            if (self.low[0] >= prior_swing_support - swing_tolerance
+                    and self.low[0] <= prior_swing_support + swing_tolerance
+                    and self.close[0] > prior_swing_support):
+                long_swing_proxy = True
+        if (atr_value > 0.0 and not isnan(prior_swing_resistance)
+                and not isnan(rsi_value) and not isnan(rsi_previous)
+                and bearish_confirmation and rsi_value < rsi_previous
+                and rsi_value >= 35.0):
+            swing_tolerance = atr_value * swing_proxy_tolerance_atr
+            if (self.high[0] <= prior_swing_resistance + swing_tolerance
+                    and self.high[0] >= prior_swing_resistance - swing_tolerance
+                    and self.close[0] < prior_swing_resistance):
+                short_swing_proxy = True
+
         long_ema_pullback = False
         short_ema_pullback = False
         if atr_value > 0 and market_trending:
@@ -1374,6 +1413,8 @@ class Main(MainContext):
                     long_stop_anchor = prior_resistance
             elif long_opportunity_continuation:
                 long_stop_anchor = self.low[0]
+            elif long_swing_proxy:
+                long_stop_anchor = self.low[0]
             elif long_ema_pullback:
                 long_stop_anchor = self.low[0]
             elif not isnan(support):
@@ -1391,6 +1432,8 @@ class Main(MainContext):
                 if prior_support > short_stop_anchor:
                     short_stop_anchor = prior_support
             elif short_opportunity_continuation:
+                short_stop_anchor = self.high[0]
+            elif short_swing_proxy:
                 short_stop_anchor = self.high[0]
             elif short_ema_pullback:
                 short_stop_anchor = self.high[0]
@@ -1436,27 +1479,17 @@ class Main(MainContext):
                 and long_momentum_ok and long_room_ok)
                 or (long_breakout_retest and long_room_ok)
                 or (long_breakout_continuation and long_room_ok)
-                or long_opportunity_continuation):
+                or long_opportunity_continuation
+                or (long_swing_proxy and long_room_ok)):
             long_setup_candidate = True
         if ((confluence <= -flat_entry_min_score and (near_resistance or short_ema_pullback)
                 and not near_support and bearish_confirmation
                 and short_momentum_ok and short_room_ok)
                 or (short_breakdown_retest and short_room_ok)
                 or (short_breakdown_continuation and short_room_ok)
-                or short_opportunity_continuation):
+                or short_opportunity_continuation
+                or (short_swing_proxy and short_room_ok)):
             short_setup_candidate = True
-
-        long_mtf_blocked = (
-            long_setup_candidate and long_risk_ok and not mtf_long_entry_ok
-        )
-        short_mtf_blocked = (
-            short_setup_candidate and short_risk_ok and not mtf_short_entry_ok
-        )
-        long_candidate = long_setup_candidate and long_risk_ok and mtf_long_entry_ok
-        short_candidate = short_setup_candidate and short_risk_ok and mtf_short_entry_ok
-        if long_candidate and short_candidate:
-            long_candidate = False
-            short_candidate = False
 
         reverse_threshold = minimum_entry_score + 1
         if reverse_threshold > 5:
@@ -1483,6 +1516,53 @@ class Main(MainContext):
             and short_momentum_ok and volume_ok
             and short_risk_ok and short_room_ok
         )
+
+        veto_long_entry = False
+        veto_short_entry = False
+        # For fresh flat entries, a swing proxy or directional setup vetoes the
+        # opposite side, including its regime-only path. Conflicting generic setups
+        # stand aside. MTF, stop/RR, cooldown, drawdown, and next-open gates remain.
+        if self._sim_side == 0:
+            if long_swing_proxy and short_swing_proxy:
+                long_setup_candidate = False
+                short_setup_candidate = False
+                long_regime_ready = False
+                short_regime_ready = False
+                veto_long_entry = True
+                veto_short_entry = True
+            elif long_swing_proxy:
+                short_setup_candidate = False
+                short_regime_ready = False
+                veto_short_entry = True
+            elif short_swing_proxy:
+                long_setup_candidate = False
+                long_regime_ready = False
+                veto_long_entry = True
+            elif long_setup_candidate and short_setup_candidate:
+                long_setup_candidate = False
+                short_setup_candidate = False
+                long_regime_ready = False
+                short_regime_ready = False
+                veto_long_entry = True
+                veto_short_entry = True
+            elif long_setup_candidate:
+                short_regime_ready = False
+                veto_short_entry = True
+            elif short_setup_candidate:
+                long_regime_ready = False
+                veto_long_entry = True
+
+        long_mtf_blocked = (
+            long_setup_candidate and long_risk_ok and not mtf_long_entry_ok
+        )
+        short_mtf_blocked = (
+            short_setup_candidate and short_risk_ok and not mtf_short_entry_ok
+        )
+        long_candidate = long_setup_candidate and long_risk_ok and mtf_long_entry_ok
+        short_candidate = short_setup_candidate and short_risk_ok and mtf_short_entry_ok
+        if long_candidate and short_candidate:
+            long_candidate = False
+            short_candidate = False
 
         # Bucket fresh entry outcomes by side and setup archetype.
         long_entry_pattern = 3
@@ -1860,6 +1940,10 @@ class Main(MainContext):
         report_text = 'Mixed price action'
         if long_mtf_blocked or short_mtf_blocked:
             report_text = 'MTF filter; wait for alignment'
+        elif long_swing_proxy:
+            report_text = 'Swing-low BUY proxy'
+        elif short_swing_proxy:
+            report_text = 'Swing-high SELL proxy'
         elif long_breakout_continuation:
             report_text = 'Breakout confirmed; buy next open'
         elif short_breakdown_continuation:
@@ -1882,7 +1966,15 @@ class Main(MainContext):
             report_text = 'Bearish EMA pressure'
 
         scenario_text = 'MIXED: wait for setup'
-        if long_candidate:
+        if long_swing_proxy and not long_room_ok:
+            scenario_text = 'SWING BUY: ROOM FILTER'
+        elif short_swing_proxy and not short_room_ok:
+            scenario_text = 'SWING SELL: ROOM FILTER'
+        elif long_candidate and long_swing_proxy:
+            scenario_text = 'LONG WATCH: SWING PROXY'
+        elif short_candidate and short_swing_proxy:
+            scenario_text = 'SHORT WATCH: SWING PROXY'
+        elif long_candidate:
             scenario_text = 'LONG WATCH: bull close'
         elif short_candidate:
             scenario_text = 'SHORT WATCH: bear close'
@@ -2086,6 +2178,10 @@ class Main(MainContext):
         signal_name = 'WAIT'
         if self._sim_risk_locked:
             signal_name = 'RISK LOCK'
+        elif long_candidate and long_swing_proxy:
+            signal_name = 'BUY SWING PROXY'
+        elif short_candidate and short_swing_proxy:
+            signal_name = 'SELL SWING PROXY'
         elif long_candidate:
             signal_name = 'BUY SETUP'
         elif short_candidate:
@@ -2796,6 +2892,10 @@ class Main(MainContext):
             buy_readiness_pct = buy_readiness_pct - 15
         if short_learning_blocked:
             sell_readiness_pct = sell_readiness_pct - 15
+        if veto_long_entry:
+            buy_readiness_pct = 0
+        if veto_short_entry:
+            sell_readiness_pct = 0
         if buy_readiness_pct < 0:
             buy_readiness_pct = 0
         if sell_readiness_pct < 0:
