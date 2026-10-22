@@ -26,6 +26,7 @@ from indie.drawings import (
 # are touched in one bar, the simulator assumes the stop hit first. In-session entry/exit
 # learning state resets when the indicator runtime is reinitialized; it is not durable.
 # Swing-reversal candidates approximate local OHLCV/RSI turns; manual chart drawings are not inputs.
+# Chart arrows are annotations: green/red pass setup gates (next-open recheck pending); amber means blocked.
 # Equity is optional: without it, trades use one simulated unit and percent risk/drawdown caps
 # cannot be calculated. No live orders are placed. Costs are estimates; actual execution differs.
 @indicator('Fighter-Jet Radar - Paper Trade Simulator', overlay_main_pane=True)
@@ -33,8 +34,8 @@ from indie.drawings import (
 @param.int('radar_length', default=14, min=1, max=250, title='ATR length')
 @param.int('volume_sma', default=20, min=1, max=500, title='Volume baseline lookback (bars)')
 @param.int('level_lookback', default=10, min=2, max=500, title='Support / resistance lookback (bars)')
-@param.int('swing_proxy_lookback', default=5, min=3, max=30, title='Swing-reversal proxy lookback (bars)')
-@param.float('swing_proxy_tolerance_atr', default=0.25, min=0.05, max=0.75, step=0.05, title='Swing-reversal level tolerance (ATR)')
+@param.int('swing_proxy_lookback', default=3, min=3, max=30, title='Swing-reversal proxy lookback (bars)')
+@param.float('swing_proxy_tolerance_atr', default=0.5, min=0.05, max=0.75, step=0.05, title='Swing-reversal level tolerance (ATR)')
 @param.int('band_length', default=20, min=2, max=250, title='Bollinger length')
 @param.float('band_multiplier', default=2.0, min=0.5, max=4.0, step=0.1, title='Bollinger deviation')
 @param.int('rsi_length', default=14, min=2, max=250, title='RSI length')
@@ -147,6 +148,12 @@ class Main(MainContext):
         self._tick_up_history.pop(0)
         self._tick_down_history.pop(0)
         self._sim_bar_index = -1
+        self._swing_proxy_cache_bar = -1
+        self._swing_proxy_cache_side = 0
+        self._swing_proxy_cache_time = nan
+        self._swing_proxy_cache_price = nan
+        self._swing_proxy_cache_atr = nan
+        self._swing_proxy_cache_gated = False
         self._mtf_time_scale = 0
         self._mtf_chart_is_1m = False
         self._mtf_trend_length = -1
@@ -372,6 +379,44 @@ class Main(MainContext):
             bg_color=color.rgba(16, 28, 38, 0.92),
             text_color=color.rgba(255, 255, 255, 1.0),
             font_size=12,
+        )
+
+    def _draw_swing_proxy_arrow(self, time_value: float, bar_delta: float,
+                                anchor_price: float, atr_value: float,
+                                side: int, arrow_color) -> None:
+        # Arrow drawings mark proxy detections; they are not simulated fills.
+        if (side == 0 or isnan(time_value) or isnan(bar_delta) or bar_delta <= 0.0
+                or isnan(anchor_price) or isnan(atr_value) or atr_value <= 0.0):
+            return
+        half_width = bar_delta * 0.18
+        if side > 0:
+            tip_price = anchor_price - atr_value * 0.05
+            shaft_price = anchor_price - atr_value * 0.30
+            head_price = tip_price - atr_value * 0.14
+        else:
+            tip_price = anchor_price + atr_value * 0.05
+            shaft_price = anchor_price + atr_value * 0.30
+            head_price = tip_price + atr_value * 0.14
+        self.chart.draw(
+            LineSegment(
+                AbsolutePosition(time_value, shaft_price),
+                AbsolutePosition(time_value, tip_price),
+                color=arrow_color, line_width=3,
+            )
+        )
+        self.chart.draw(
+            LineSegment(
+                AbsolutePosition(time_value, tip_price),
+                AbsolutePosition(time_value - half_width, head_price),
+                color=arrow_color, line_width=3,
+            )
+        )
+        self.chart.draw(
+            LineSegment(
+                AbsolutePosition(time_value, tip_price),
+                AbsolutePosition(time_value + half_width, head_price),
+                color=arrow_color, line_width=3,
+            )
         )
 
     def _update_live_tick_counts(self, current_price: float) -> None:
@@ -954,6 +999,23 @@ class Main(MainContext):
         )
         self._update_drawdown_state(account_equity_quote, max_drawdown_pct)
         new_sim_bar = self.bar_index != self._sim_bar_index
+        if (new_sim_bar and self._swing_proxy_cache_side != 0
+                and self._swing_proxy_cache_bar == self.bar_index - 1):
+            arrow_delta = nan
+            if len(self.time) >= 2:
+                arrow_delta = abs(self.time[0] - self.time[1])
+            proxy_arrow_color = color.rgba(255, 220, 0, 1.0)
+            if self._swing_proxy_cache_gated:
+                if self._swing_proxy_cache_side > 0:
+                    proxy_arrow_color = color.rgba(0, 255, 0, 1.0)
+                else:
+                    proxy_arrow_color = color.rgba(255, 0, 0, 1.0)
+            self._draw_swing_proxy_arrow(
+                self._swing_proxy_cache_time, arrow_delta,
+                self._swing_proxy_cache_price,
+                self._swing_proxy_cache_atr,
+                self._swing_proxy_cache_side, proxy_arrow_color,
+            )
         if (self._mtf_trend_length != trend_length
                 or self._mtf_radar_length != radar_length
                 or self._mtf_volume_sma != volume_sma
@@ -1245,8 +1307,7 @@ class Main(MainContext):
                 and bullish_confirmation and rsi_value > rsi_previous
                 and rsi_value <= 65.0):
             swing_tolerance = atr_value * swing_proxy_tolerance_atr
-            if (self.low[0] >= prior_swing_support - swing_tolerance
-                    and self.low[0] <= prior_swing_support + swing_tolerance
+            if (self.low[0] <= prior_swing_support + swing_tolerance
                     and self.close[0] > prior_swing_support):
                 long_swing_proxy = True
         if (atr_value > 0.0 and not isnan(prior_swing_resistance)
@@ -1254,8 +1315,7 @@ class Main(MainContext):
                 and bearish_confirmation and rsi_value < rsi_previous
                 and rsi_value >= 35.0):
             swing_tolerance = atr_value * swing_proxy_tolerance_atr
-            if (self.high[0] <= prior_swing_resistance + swing_tolerance
-                    and self.high[0] >= prior_swing_resistance - swing_tolerance
+            if (self.high[0] >= prior_swing_resistance - swing_tolerance
                     and self.close[0] < prior_swing_resistance):
                 short_swing_proxy = True
 
@@ -1601,6 +1661,33 @@ class Main(MainContext):
             short_regime_ready = False
             short_learning_blocked = True
 
+        self._swing_proxy_cache_bar = self.bar_index
+        self._swing_proxy_cache_side = 0
+        self._swing_proxy_cache_time = nan
+        self._swing_proxy_cache_price = nan
+        self._swing_proxy_cache_atr = nan
+        self._swing_proxy_cache_gated = False
+        if long_swing_proxy and not short_swing_proxy:
+            self._swing_proxy_cache_side = 1
+            self._swing_proxy_cache_time = self.time[0]
+            self._swing_proxy_cache_price = self.low[0]
+            self._swing_proxy_cache_atr = atr_value
+            self._swing_proxy_cache_gated = (
+                long_candidate and self._sim_side == 0
+                and not self._sim_risk_locked
+                and self.bar_index >= self._sim_cooldown_until_bar
+            )
+        elif short_swing_proxy and not long_swing_proxy:
+            self._swing_proxy_cache_side = -1
+            self._swing_proxy_cache_time = self.time[0]
+            self._swing_proxy_cache_price = self.high[0]
+            self._swing_proxy_cache_atr = atr_value
+            self._swing_proxy_cache_gated = (
+                short_candidate and self._sim_side == 0
+                and not self._sim_risk_locked
+                and self.bar_index >= self._sim_cooldown_until_bar
+            )
+
         long_reverse_candidate = (
             mtf_long_ok and market_trending and ema_up
             and confluence >= reverse_threshold
@@ -1938,12 +2025,24 @@ class Main(MainContext):
                 stop_exit_marker = self._sim_exit_event_price
 
         report_text = 'Mixed price action'
-        if long_mtf_blocked or short_mtf_blocked:
-            report_text = 'MTF filter; wait for alignment'
-        elif long_swing_proxy:
+        if long_swing_proxy:
             report_text = 'Swing-low BUY proxy'
+            if not long_room_ok:
+                report_text = 'SWING BUY proxy; room block'
+            elif long_setup_candidate and not long_risk_ok:
+                report_text = 'SWING BUY proxy; stop/RR block'
+            elif long_mtf_blocked:
+                report_text = 'SWING BUY proxy; MTF block'
         elif short_swing_proxy:
             report_text = 'Swing-high SELL proxy'
+            if not short_room_ok:
+                report_text = 'SWING SELL proxy; room block'
+            elif short_setup_candidate and not short_risk_ok:
+                report_text = 'SWING SELL proxy; stop/RR block'
+            elif short_mtf_blocked:
+                report_text = 'SWING SELL proxy; MTF block'
+        elif long_mtf_blocked or short_mtf_blocked:
+            report_text = 'MTF filter; wait for alignment'
         elif long_breakout_continuation:
             report_text = 'Breakout confirmed; buy next open'
         elif short_breakdown_continuation:
@@ -1991,11 +2090,22 @@ class Main(MainContext):
         elif confluence <= -flat_entry_min_score:
             scenario_text = 'BEARISH: wait rally'
         if long_setup_candidate and not long_risk_ok:
-            scenario_text = 'RISK FILTER: stop/RR'
+            if long_swing_proxy:
+                scenario_text = 'SWING BUY: STOP/RR FILTER'
+            else:
+                scenario_text = 'RISK FILTER: stop/RR'
         elif short_setup_candidate and not short_risk_ok:
-            scenario_text = 'RISK FILTER: stop/RR'
+            if short_swing_proxy:
+                scenario_text = 'SWING SELL: STOP/RR FILTER'
+            else:
+                scenario_text = 'RISK FILTER: stop/RR'
         elif long_mtf_blocked or short_mtf_blocked:
-            scenario_text = 'MTF FILTER: WAIT ALIGNMENT'
+            if long_swing_proxy and long_mtf_blocked:
+                scenario_text = 'SWING BUY: MTF FILTER'
+            elif short_swing_proxy and short_mtf_blocked:
+                scenario_text = 'SWING SELL: MTF FILTER'
+            else:
+                scenario_text = 'MTF FILTER: WAIT ALIGNMENT'
         elif long_learning_blocked or short_learning_blocked:
             scenario_text = 'ENTRY LEARN: SCORE FILTER'
         elif not risk_ready and not long_candidate and not short_candidate:
@@ -2182,6 +2292,22 @@ class Main(MainContext):
             signal_name = 'BUY SWING PROXY'
         elif short_candidate and short_swing_proxy:
             signal_name = 'SELL SWING PROXY'
+        elif long_swing_proxy and not long_room_ok:
+            signal_name = 'BUY PX ROOM'
+        elif short_swing_proxy and not short_room_ok:
+            signal_name = 'SELL PX ROOM'
+        elif long_swing_proxy and long_setup_candidate and not long_risk_ok:
+            signal_name = 'BUY PX STOP/RR'
+        elif short_swing_proxy and short_setup_candidate and not short_risk_ok:
+            signal_name = 'SELL PX STOP/RR'
+        elif long_swing_proxy and long_mtf_blocked:
+            signal_name = 'BUY PX MTF'
+        elif short_swing_proxy and short_mtf_blocked:
+            signal_name = 'SELL PX MTF'
+        elif long_swing_proxy and long_learning_blocked:
+            signal_name = 'BUY PX LEARN'
+        elif short_swing_proxy and short_learning_blocked:
+            signal_name = 'SELL PX LEARN'
         elif long_candidate:
             signal_name = 'BUY SETUP'
         elif short_candidate:
@@ -2525,6 +2651,26 @@ class Main(MainContext):
             )
         elif self.bar_index < self._sim_cooldown_until_bar:
             chat_thought_text = 'Post-exit cooldown.'
+        elif long_candidate and long_swing_proxy:
+            chat_thought_text = 'SWING BUY proxy; next-open check.'
+        elif short_candidate and short_swing_proxy:
+            chat_thought_text = 'SWING SELL proxy; next-open check.'
+        elif long_swing_proxy and not long_room_ok:
+            chat_thought_text = 'SWING BUY proxy blocked by room.'
+        elif short_swing_proxy and not short_room_ok:
+            chat_thought_text = 'SWING SELL proxy blocked by room.'
+        elif long_swing_proxy and long_setup_candidate and not long_risk_ok:
+            chat_thought_text = 'SWING BUY proxy blocked by stop/RR.'
+        elif short_swing_proxy and short_setup_candidate and not short_risk_ok:
+            chat_thought_text = 'SWING SELL proxy blocked by stop/RR.'
+        elif long_swing_proxy and long_mtf_blocked:
+            chat_thought_text = 'SWING BUY proxy blocked by MTF.'
+        elif short_swing_proxy and short_mtf_blocked:
+            chat_thought_text = 'SWING SELL proxy blocked by MTF.'
+        elif long_swing_proxy and long_learning_blocked:
+            chat_thought_text = 'SWING BUY proxy blocked by learner gate.'
+        elif short_swing_proxy and short_learning_blocked:
+            chat_thought_text = 'SWING SELL proxy blocked by learner gate.'
         elif long_candidate:
             chat_thought_text = (
                 'SIM BUY near ' + price_text + '; checking gates.'
