@@ -383,12 +383,17 @@ class Main(MainContext):
 
     def _draw_swing_proxy_arrow(self, time_value: float, bar_delta: float,
                                 anchor_price: float, atr_value: float,
-                                side: int, arrow_color) -> None:
+                                side: int, gated: bool) -> None:
         # Arrow drawings mark proxy detections; they are not simulated fills.
         if (side == 0 or isnan(time_value) or isnan(bar_delta) or bar_delta <= 0.0
                 or isnan(anchor_price) or isnan(atr_value) or atr_value <= 0.0):
             return
         half_width = bar_delta * 0.18
+        gated_long = int(gated and side > 0)
+        gated_state = int(gated)
+        arrow_red = 255 * (1 - gated_long)
+        arrow_green = 220 * (1 - gated_state) + 255 * gated_long
+        arrow_color = color.rgba(arrow_red, arrow_green, 0, 1.0)
         tip_price = anchor_price - atr_value * 0.05 * side
         shaft_price = anchor_price - atr_value * 0.30 * side
         head_price = tip_price - atr_value * 0.14 * side
@@ -999,17 +1004,12 @@ class Main(MainContext):
             arrow_delta = nan
             if len(self.time) >= 2:
                 arrow_delta = abs(self.time[0] - self.time[1])
-            proxy_arrow_color = color.rgba(255, 220, 0, 1.0)
-            if self._swing_proxy_cache_gated:
-                if self._swing_proxy_cache_side > 0:
-                    proxy_arrow_color = color.rgba(0, 255, 0, 1.0)
-                else:
-                    proxy_arrow_color = color.rgba(255, 0, 0, 1.0)
             self._draw_swing_proxy_arrow(
                 self._swing_proxy_cache_time, arrow_delta,
                 self._swing_proxy_cache_price,
                 self._swing_proxy_cache_atr,
-                self._swing_proxy_cache_side, proxy_arrow_color,
+                self._swing_proxy_cache_side,
+                self._swing_proxy_cache_gated,
             )
         if (self._mtf_trend_length != trend_length
                 or self._mtf_radar_length != radar_length
