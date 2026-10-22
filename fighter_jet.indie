@@ -73,12 +73,12 @@ from indie.drawings import (
     color=color.rgba(255, 0, 255, 1.0), line_width=2,
 )
 @plot.steps(
-    id='support_level', title='10-bar support',
-    color=color.rgba(0, 180, 0, 0.85), line_width=1,
+    id='support_level', title='Dynamic rolling support',
+    color=color.rgba(0, 180, 0, 1.0), line_width=2,
 )
 @plot.steps(
-    id='resistance_level', title='10-bar resistance',
-    color=color.rgba(255, 0, 180, 0.85), line_width=1,
+    id='resistance_level', title='Dynamic rolling resistance',
+    color=color.rgba(255, 0, 180, 1.0), line_width=2,
 )
 @plot.line(id='bb_lower', title='Bollinger lower band', color=color.rgba(50, 170, 255, 0.8), line_width=1)
 @plot.line(id='bb_upper', title='Bollinger upper band', color=color.rgba(50, 170, 255, 0.8), line_width=1)
@@ -226,8 +226,6 @@ class Main(MainContext):
         self._sim_policy_last_bar = [-1, -1, -1]
         self._sim_last_net_r = nan
         self._sim_last_reward = nan
-        self._last_support_marker_bar = -1000000
-        self._last_resistance_marker_bar = -1000000
         self._status_label = LabelRel(
             '',
             RelativePosition(
@@ -1029,6 +1027,8 @@ class Main(MainContext):
             volume_ready = True
             volume_ok = self.volume[0] > volume_reference
 
+        # Horizontal rolling S/R step lines recalculate from price data every update.
+        # On the live bar they may move intrabar as its low/high extends; they settle at close.
         support = nan
         resistance = nan
         prior_support = nan
@@ -1211,31 +1211,6 @@ class Main(MainContext):
                 bearish_candle = True
                 if self.close[0] < self.close[1]:
                     bearish_confirmation = True
-
-        # Mark confirmed tests of levels that existed before the completed candle.
-        # These use prior-bar data and are drawn once at the next bar, avoiding live repaint.
-        support_rejection_marker = False
-        resistance_rejection_marker = False
-        if len(self.close) >= level_lookback + 2 and atr_previous > 0:
-            prior_candle_range = self.high[1] - self.low[1]
-            if prior_candle_range > 0:
-                marker_tolerance = atr_previous * 0.2
-                if not isnan(support_two_bars_ago):
-                    support_rejection_marker = (
-                        self.low[1] >= support_two_bars_ago - marker_tolerance
-                        and self.low[1] <= support_two_bars_ago + marker_tolerance
-                        and self.close[1] > support_two_bars_ago
-                        and self.close[1] > self.open[1]
-                        and self.close[1] >= self.low[1] + prior_candle_range * 0.55
-                    )
-                if not isnan(resistance_two_bars_ago):
-                    resistance_rejection_marker = (
-                        self.high[1] >= resistance_two_bars_ago - marker_tolerance
-                        and self.high[1] <= resistance_two_bars_ago + marker_tolerance
-                        and self.close[1] < resistance_two_bars_ago
-                        and self.close[1] < self.open[1]
-                        and self.close[1] <= self.low[1] + prior_candle_range * 0.45
-                    )
 
         long_momentum_ok = False
         short_momentum_ok = False
@@ -2064,33 +2039,6 @@ class Main(MainContext):
             + volume_short + ' | ' + scenario_text + '\n'
             + sim_summary
         )
-
-        # Keep horizontal price levels as guides; add sparse vertical markers on
-        # confirmed support/resistance rejection candles from completed bars.
-        if (new_sim_bar and support_rejection_marker
-                and self.bar_index - self._last_support_marker_bar >= 3
-                and not isnan(self.time[1])):
-            self.chart.draw(
-                LineSegment(
-                    AbsolutePosition(self.time[1], self.low[1]),
-                    AbsolutePosition(self.time[1], self.high[1]),
-                    color=color.rgba(0, 180, 0, 0.9),
-                    line_width=2,
-                )
-            )
-            self._last_support_marker_bar = self.bar_index
-        if (new_sim_bar and resistance_rejection_marker
-                and self.bar_index - self._last_resistance_marker_bar >= 3
-                and not isnan(self.time[1])):
-            self.chart.draw(
-                LineSegment(
-                    AbsolutePosition(self.time[1], self.low[1]),
-                    AbsolutePosition(self.time[1], self.high[1]),
-                    color=color.rgba(255, 0, 180, 0.9),
-                    line_width=2,
-                )
-            )
-            self._last_resistance_marker_bar = self.bar_index
 
         support_color = color.rgba(0, 180, 0, 1.0)
         resistance_color = color.rgba(255, 0, 180, 1.0)
