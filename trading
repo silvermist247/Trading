@@ -19,7 +19,7 @@ from indie.drawings import (
 # Stop/RR, risk sizing, cooldown, full-MTF reversal safeguards and live-order behavior are unchanged.
 # Run on a 1-minute chart: completed 1m candles feed 5m, 15m, 1h, 4h, and UTC-day research bars.
 # The existing trade gate still uses only 5m/15m/1h/4h and keeps its prior warmup and safeguards.
-# The daily NN, KNN, S/R learner, and weighted consensus are bounded shadow diagnostics.
+# The daily NN/KNN, S/R learner, MACD vote, and weighted consensus are shadow diagnostics.
 # The selected style sets simulated TP1/TP2 partials inside the existing TP3 target; the entry
 # stop/RR gate and initial risk sizing still use the full TP3 plan. These are paper fills only.
 # A confirmed daily-stress flag only vetoes fresh entries at planning/next-open checks; it does
@@ -159,6 +159,15 @@ class Main(MainContext):
         self._tick_up_history.pop(0)
         self._tick_down_history.pop(0)
         self._sim_bar_index = -1
+        self._macd_fast_count = 0
+        self._macd_slow_count = 0
+        self._macd_signal_count = 0
+        self._macd_fast_seed_sum = 0.0
+        self._macd_slow_seed_sum = 0.0
+        self._macd_signal_seed_sum = 0.0
+        self._macd_fast_ema = nan
+        self._macd_slow_ema = nan
+        self._macd_signal_ema = nan
         self._swing_proxy_cache_bar = -1
         self._swing_proxy_cache_side = 0
         self._swing_proxy_cache_time = nan
@@ -387,7 +396,7 @@ class Main(MainContext):
             ),
             bg_color=color.rgba(16, 28, 38, 0.92),
             text_color=color.rgba(255, 255, 255, 1.0),
-            font_size=12,
+            font_size=10,
         )
         self._chat_label = LabelRel(
             '',
@@ -1009,12 +1018,51 @@ class Main(MainContext):
         self._sim_initial_risk_per_unit = nan
         self._sim_entry_context = -1
 
-    def _center_text_line(self, text: str, width: int) -> str:
-        padding_count = int((width - len(text)) / 2.0)
-        left_padding = ''
-        for pad_index in range(padding_count):
-            left_padding = left_padding + ' '
-        return left_padding + text
+    # Standard 12/26/9 MACD; this advances only on completed 1m closes.
+    def _update_macd(self, close_value: float) -> None:
+        if isnan(close_value):
+            return
+
+        self._macd_fast_count = self._macd_fast_count + 1
+        if self._macd_fast_count <= 12:
+            self._macd_fast_seed_sum = self._macd_fast_seed_sum + close_value
+            if self._macd_fast_count == 12:
+                self._macd_fast_ema = self._macd_fast_seed_sum / 12.0
+        else:
+            self._macd_fast_ema = (
+                close_value * (2.0 / 13.0)
+                + self._macd_fast_ema * (11.0 / 13.0)
+            )
+
+        self._macd_slow_count = self._macd_slow_count + 1
+        if self._macd_slow_count <= 26:
+            self._macd_slow_seed_sum = self._macd_slow_seed_sum + close_value
+            if self._macd_slow_count == 26:
+                self._macd_slow_ema = self._macd_slow_seed_sum / 26.0
+        else:
+            self._macd_slow_ema = (
+                close_value * (2.0 / 27.0)
+                + self._macd_slow_ema * (25.0 / 27.0)
+            )
+
+        if (self._macd_fast_count < 12 or self._macd_slow_count < 26
+                or isnan(self._macd_fast_ema)
+                or isnan(self._macd_slow_ema)):
+            return
+
+        macd_line_value = self._macd_fast_ema - self._macd_slow_ema
+        self._macd_signal_count = self._macd_signal_count + 1
+        if self._macd_signal_count <= 9:
+            self._macd_signal_seed_sum = (
+                self._macd_signal_seed_sum + macd_line_value
+            )
+            if self._macd_signal_count == 9:
+                self._macd_signal_ema = self._macd_signal_seed_sum / 9.0
+        else:
+            self._macd_signal_ema = (
+                macd_line_value * (2.0 / 10.0)
+                + self._macd_signal_ema * (8.0 / 10.0)
+            )
 
     def _clip_value(self, value: float, lower: float, upper: float) -> float:
         if value < lower:
@@ -2085,6 +2133,8 @@ class Main(MainContext):
                 self.close[1], self.volume[1], trend_length,
                 radar_length, volume_sma, band_length, rsi_length,
             )
+            if self._mtf_chart_is_1m:
+                self._update_macd(self.close[1])
         price_changed = False
         price_went_up = False
         price_went_down = False
@@ -2180,6 +2230,49 @@ class Main(MainContext):
             rsi_value = rsi_series[0]
             if len(self.close) >= rsi_length + 1:
                 rsi_previous = rsi_series[1]
+
+        macd_display_ready = False
+        macd_component = 0.0
+        macd_histogram_value = nan
+        normalized_macd_histogram = nan
+        macd_status_text = 'MACD WARM'
+        if (not isnan(current_price) and self._macd_fast_count >= 12
+                and self._macd_slow_count >= 26
+                and self._macd_signal_count >= 9
+                and not isnan(self._macd_fast_ema)
+                and not isnan(self._macd_slow_ema)
+                and not isnan(self._macd_signal_ema)):
+            macd_fast_current = (
+                current_price * (2.0 / 13.0)
+                + self._macd_fast_ema * (11.0 / 13.0)
+            )
+            macd_slow_current = (
+                current_price * (2.0 / 27.0)
+                + self._macd_slow_ema * (25.0 / 27.0)
+            )
+            macd_line_current = macd_fast_current - macd_slow_current
+            macd_signal_current = (
+                macd_line_current * (2.0 / 10.0)
+                + self._macd_signal_ema * (8.0 / 10.0)
+            )
+            macd_histogram_value = macd_line_current - macd_signal_current
+            if atr_value > 0.0:
+                normalized_macd_histogram = macd_histogram_value / atr_value
+                macd_component = self._clip_value(
+                    normalized_macd_histogram, -1.0, 1.0,
+                )
+                macd_display_ready = True
+                macd_status_text = 'MACD H/ATR'
+                if normalized_macd_histogram > 0.0:
+                    macd_status_text = macd_status_text + '+'
+                elif normalized_macd_histogram < 0.0:
+                    macd_status_text = macd_status_text + '-'
+                macd_status_text = (
+                    macd_status_text
+                    + str(round(abs(normalized_macd_histogram), 2))
+                )
+            else:
+                macd_status_text = 'MACD ATR WAIT'
 
         if new_sim_bar and len(self.close) >= 2:
             self._update_sr_interactions(
@@ -2338,6 +2431,10 @@ class Main(MainContext):
         daily_component = 0.0
         sfx_total_weight = 0.25
         sfx_weighted_sum = local_component * 0.25
+        # MACD is a bounded shadow vote only; it does not change entry gates.
+        if macd_display_ready:
+            sfx_weighted_sum = sfx_weighted_sum + macd_component * 0.10
+            sfx_total_weight = sfx_total_weight + 0.10
         if mtf_ready:
             sfx_weighted_sum = sfx_weighted_sum + mtf_component * 0.30
             sfx_total_weight = sfx_total_weight + 0.30
@@ -3442,9 +3539,9 @@ class Main(MainContext):
             + self._sim_policy_counts[policy_slot + 1]
             + self._sim_policy_counts[policy_slot + 2]
         )
-        sim_pnl_label = 'NET P/L/1U ' + str(round(self._sim_realized_pnl, 2))
+        sim_pnl_label = 'NET/1U ' + str(round(self._sim_realized_pnl, 2))
         if equity_configured:
-            sim_pnl_label = 'NET P/L ' + str(round(self._sim_realized_pnl, 2))
+            sim_pnl_label = 'NET ' + str(round(self._sim_realized_pnl, 2))
 
         sr_score_text = '--'
         if near_support or near_resistance:
@@ -3453,13 +3550,13 @@ class Main(MainContext):
             sr_score_text = str(round(self._sr_model_score))
         sr_summary_text = (
             'SR ' + self._sr_last_event_text + ' q' + sr_score_text
-            + 'u SB' + str(self._sr_support_bounces) + '/br'
+            + ' SB' + str(self._sr_support_bounces) + '/'
             + str(self._sr_support_breaks) + ' RB'
-            + str(self._sr_resistance_bounces) + '/br'
+            + str(self._sr_resistance_bounces) + '/'
             + str(self._sr_resistance_breaks) + ' n'
             + str(self._sr_model_updates)
         )
-        simulation_metrics_text = 'SIM n0 W-- PF-- avgR-- DDn/a'
+        simulation_metrics_text = 'SIM n0 W-- PF-- avgR-- DD--'
         if self._sim_closed_count > 0:
             sim_win_rate = (
                 self._sim_win_count * 100.0 / self._sim_closed_count
@@ -3542,6 +3639,7 @@ class Main(MainContext):
             candle_reason = 'C+'
         elif bearish_candle:
             candle_reason = 'C-'
+        macd_reason = macd_status_text
 
         signal_name = 'WAIT'
         if self._sim_risk_locked:
@@ -3640,23 +3738,23 @@ class Main(MainContext):
             plan_text = 'WAIT: ENTRY LEARN SELL SCORE FILTER'
 
         cost_text = 'COST ' + str(round(round_trip_cost_pct, 2)) + '%'
-        size_text = 'SIM 1 UNIT | ' + cost_text
+        size_text = 'SIM1U ' + cost_text
         if self._sim_risk_locked:
-            size_text = 'RISK LOCK | ' + cost_text
+            size_text = 'LOCK ' + cost_text
         elif not equity_configured:
-            size_text = 'SIM 1 UNIT | EQ unset | ' + cost_text
+            size_text = 'SIM1U EQ-- ' + cost_text
         elif self._sim_side != 0:
-            size_text = 'SIM QTY~' + str(round(self._sim_units, 8)) + ' | ' + cost_text
+            size_text = 'QTY~' + str(round(self._sim_units, 8)) + ' ' + cost_text
         elif long_candidate and long_risk_unit_distance > 0:
             long_units = risk_budget_quote / long_risk_unit_distance
-            size_text = 'PLAN QTY~' + str(round(long_units, 8)) + ' | ' + cost_text
+            size_text = 'PLAN QTY~' + str(round(long_units, 8)) + ' ' + cost_text
         elif short_candidate and short_risk_unit_distance > 0:
             short_units = risk_budget_quote / short_risk_unit_distance
-            size_text = 'PLAN QTY~' + str(round(short_units, 8)) + ' | ' + cost_text
+            size_text = 'PLAN QTY~' + str(round(short_units, 8)) + ' ' + cost_text
         elif risk_ready:
             size_text = (
-                'RISK ' + str(round(risk_per_trade_pct, 2))
-                + '% | WAIT | ' + cost_text
+                'RISK' + str(round(risk_per_trade_pct, 2))
+                + '% ' + cost_text
             )
 
         tick_net = self._tick_up_count - self._tick_down_count
@@ -3668,12 +3766,6 @@ class Main(MainContext):
         tick_buy_caption = 'TICKS/BAR | BUY '
         tick_sell_caption = ' | SELL '
         tick_net_caption = ' | NET '
-        tick_line_width = (
-            len(tick_buy_caption) + len(tick_buy_count_text)
-            + len(tick_sell_caption) + len(tick_sell_count_text)
-            + len(tick_net_caption) + len(tick_net_text)
-        )
-
         tick_history_count = len(self._tick_up_history)
         tick_sample_count = tick_history_count + 1
         if tick_sample_count > 20:
@@ -3703,20 +3795,61 @@ class Main(MainContext):
 
         why_text = (
             trend_reason + ' ' + bb_reason + ' ' + rsi_reason + ' '
-            + volume_reason + ' ' + candle_reason
+            + volume_reason + ' ' + candle_reason + ' ' + macd_reason
         )
+        analyst_state_text = 'FLAT'
+        if self._sim_side > 0:
+            analyst_state_text = 'LONG'
+        elif self._sim_side < 0:
+            analyst_state_text = 'SHORT'
+        elif self._pending_side > 0:
+            analyst_state_text = 'BUY NEXT'
+        elif self._pending_side < 0:
+            analyst_state_text = 'SELL NEXT'
+        if self._sim_risk_locked and self._sim_side == 0:
+            analyst_state_text = 'RISK LOCK'
+        if self._sim_exit_event_bar == self.bar_index:
+            if self._sim_exit_event_type == 1:
+                analyst_state_text = 'TP HIT'
+            elif self._sim_exit_event_type == -1:
+                analyst_state_text = 'STOP HIT'
+            elif self._sim_exit_event_type == 2:
+                analyst_state_text = 'REVERSED'
+            elif self._sim_exit_event_type == -2:
+                analyst_state_text = 'DD EXIT'
+
+        analyst_plan_text = plan_text
+        if self._sim_side > 0:
+            analyst_plan_text = (
+                'LONG ' + str(round(self._sim_entry_price, price_precision))
+                + ' SL ' + str(round(self._sim_stop, price_precision))
+                + ' T3 ' + str(round(self._sim_target, price_precision))
+            )
+        elif self._sim_side < 0:
+            analyst_plan_text = (
+                'SHORT ' + str(round(self._sim_entry_price, price_precision))
+                + ' SL ' + str(round(self._sim_stop, price_precision))
+                + ' T3 ' + str(round(self._sim_target, price_precision))
+            )
+        elif self._pending_side > 0:
+            analyst_plan_text = (
+                'NEXT BUY SL ' + str(round(self._pending_stop, price_precision))
+                + ' T3 ' + str(round(self._pending_target, price_precision))
+            )
+        elif self._pending_side < 0:
+            analyst_plan_text = (
+                'NEXT SELL SL ' + str(round(self._pending_stop, price_precision))
+                + ' T3 ' + str(round(self._pending_target, price_precision))
+            )
+
         analyst_text = (
-            self._center_text_line(
-                'STATE: ' + sim_state_text + ' | ' + signal_name,
-                tick_line_width,
-            ) + '\n'
-            + self._center_text_line('WHY: ' + why_text, tick_line_width) + '\n'
-            + self._center_text_line(plan_text, tick_line_width) + '\n'
-            + self._center_text_line(sim_pnl_label, tick_line_width) + '\n'
-            + self._center_text_line(size_text, tick_line_width) + '\n'
-            + self._center_text_line(tick_average_text, tick_line_width) + '\n'
-            + self._center_text_line(sr_summary_text, tick_line_width) + '\n'
-            + self._center_text_line(simulation_metrics_text, tick_line_width)
+            'STATE ' + analyst_state_text + ' | ' + signal_name + '\n'
+            + 'WHY ' + why_text + '\n'
+            + analyst_plan_text + '\n'
+            + sim_pnl_label + ' | ' + size_text + '\n'
+            + tick_average_text + '\n'
+            + sr_summary_text + '\n'
+            + simulation_metrics_text
         )
         self._analyst_label.text = analyst_text
         self._analyst_label.text_color = color.rgba(255, 255, 255, 1.0)
