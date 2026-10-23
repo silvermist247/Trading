@@ -189,8 +189,69 @@ class Main(MainContext):
             history.pop(0)
         for history in self._mtf_volume_histories:
             history.pop(0)
-        self._reset_daily_research_models()
-        self._reset_sr_research()
+
+        # Declare all adaptive-research state here: Indie permits adding Main fields
+        # only in __init__. The reset helpers below only update these declared fields.
+        self._daily_atr_history = []
+        self._daily_sample_features = []
+        self._daily_sample_continuation = []
+        self._daily_nn_errors = []
+        self._daily_baseline_errors = []
+        self._daily_pending_features = []
+        self._daily_pending_valid = False
+        self._daily_pending_close = nan
+        self._daily_pending_atr = nan
+        self._daily_pending_direction = 0
+        self._daily_pending_nn_score = 0.0
+        self._daily_pending_baseline = 0
+        self._daily_nn_input_weights = [
+            0.18, -0.12, 0.08, -0.04, 0.14,
+            0.06, 0.16, -0.10, 0.04, -0.14,
+            0.12, 0.05, 0.17, -0.09, 0.03,
+            0.15, -0.08, 0.12, 0.06, -0.11,
+            -0.10, 0.11, 0.05, 0.17, -0.06,
+            0.07, -0.13, 0.09, 0.04, 0.15,
+        ]
+        self._daily_nn_hidden_biases = [0.01, -0.02, 0.0, 0.03, -0.01]
+        self._daily_nn_output_weights = [0.20, -0.15, 0.10, 0.18, -0.12]
+        self._daily_nn_output_bias = 0.0
+        self._daily_sample_count = 0
+        self._daily_nn_score = 0.0
+        self._daily_nn_error_rate = nan
+        self._daily_baseline_error_rate = nan
+        self._daily_nn_trusted = False
+        self._daily_nn_state_code = 0
+        self._daily_baseline_state_code = 0
+        self._daily_state_code = 0
+        self._daily_knn_score = 0.0
+        self._daily_knn_count = 0
+        self._daily_knn_share = nan
+        self._daily_stress = False
+        self._daily_ready = False
+        self._daily_research_text = 'D1 UTC WARMUP | NN/KNN shadow'
+
+        self._sr_model_weights = [0.0, 0.20, 0.10, 0.10, 0.05]
+        self._sr_support_pending = False
+        self._sr_resistance_pending = False
+        self._sr_support_level = nan
+        self._sr_resistance_level = nan
+        self._sr_support_atr = nan
+        self._sr_resistance_atr = nan
+        self._sr_support_age = 0
+        self._sr_resistance_age = 0
+        self._sr_support_features = [0.0, 0.0, 0.0, 0.0, 0.0]
+        self._sr_resistance_features = [0.0, 0.0, 0.0, 0.0, 0.0]
+        self._sr_last_support_touch_bar = -100000
+        self._sr_last_resistance_touch_bar = -100000
+        self._sr_support_bounces = 0
+        self._sr_support_breaks = 0
+        self._sr_resistance_bounces = 0
+        self._sr_resistance_breaks = 0
+        self._sr_neutral_events = 0
+        self._sr_model_updates = 0
+        self._sr_model_score = 50.0
+        self._sr_last_event_text = 'NO RETEST'
+
         self._sr_lookback = -1
         self._pending_side = 0
         self._pending_stop = nan
