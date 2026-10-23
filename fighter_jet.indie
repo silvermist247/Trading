@@ -1100,7 +1100,9 @@ class Main(MainContext):
             -2.0, 2.0,
         )
 
-    def _daily_knn_predict(self, features: list[float]):
+    def _daily_knn_predict(
+        self, features: list[float],
+    ) -> tuple[float, int, float]:
         neighbor_distances = [1000000.0, 1000000.0, 1000000.0, 1000000.0, 1000000.0]
         neighbor_labels = [0, 0, 0, 0, 0]
         neighbor_count = 0
