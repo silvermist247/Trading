@@ -192,12 +192,18 @@ class Main(MainContext):
 
         # Declare all adaptive-research state here: Indie permits adding Main fields
         # only in __init__. The reset helpers below only update these declared fields.
-        self._daily_atr_history = []
-        self._daily_sample_features = []
-        self._daily_sample_continuation = []
-        self._daily_nn_errors = []
-        self._daily_baseline_errors = []
-        self._daily_pending_features = []
+        self._daily_atr_history: list[float] = [0.0]
+        self._daily_atr_history.pop(0)
+        self._daily_sample_features: list[list[float]] = [[0.0]]
+        self._daily_sample_features.pop(0)
+        self._daily_sample_continuation: list[int] = [0]
+        self._daily_sample_continuation.pop(0)
+        self._daily_nn_errors: list[float] = [0.0]
+        self._daily_nn_errors.pop(0)
+        self._daily_baseline_errors: list[float] = [0.0]
+        self._daily_baseline_errors.pop(0)
+        self._daily_pending_features: list[float] = [0.0]
+        self._daily_pending_features.pop(0)
         self._daily_pending_valid = False
         self._daily_pending_close = nan
         self._daily_pending_atr = nan
@@ -1018,12 +1024,18 @@ class Main(MainContext):
         return value
 
     def _reset_daily_research_models(self) -> None:
-        self._daily_atr_history = []
-        self._daily_sample_features = []
-        self._daily_sample_continuation = []
-        self._daily_nn_errors = []
-        self._daily_baseline_errors = []
-        self._daily_pending_features = []
+        self._daily_atr_history = [0.0]
+        self._daily_atr_history.pop(0)
+        self._daily_sample_features = [[0.0]]
+        self._daily_sample_features.pop(0)
+        self._daily_sample_continuation = [0]
+        self._daily_sample_continuation.pop(0)
+        self._daily_nn_errors = [0.0]
+        self._daily_nn_errors.pop(0)
+        self._daily_baseline_errors = [0.0]
+        self._daily_baseline_errors.pop(0)
+        self._daily_pending_features = [0.0]
+        self._daily_pending_features.pop(0)
         self._daily_pending_valid = False
         self._daily_pending_close = nan
         self._daily_pending_atr = nan
@@ -1071,7 +1083,7 @@ class Main(MainContext):
         return 'WATCH'
 
     def _daily_nn_forward(self, features: list[float]) -> float:
-        hidden_values = []
+        hidden_values: list[float] = []
         for hidden_index in range(5):
             hidden_input = self._daily_nn_hidden_biases[hidden_index]
             for feature_index in range(6):
@@ -1093,8 +1105,8 @@ class Main(MainContext):
         return self._clip_value(output_value, -1.0, 1.0)
 
     def _daily_nn_train(self, features: list[float], target: int) -> None:
-        hidden_inputs = []
-        hidden_values = []
+        hidden_inputs: list[float] = []
+        hidden_values: list[float] = []
         for hidden_index in range(5):
             hidden_input = self._daily_nn_hidden_biases[hidden_index]
             for feature_index in range(6):
