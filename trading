@@ -31,7 +31,7 @@ from indie.drawings import (
 # any target are touched in one bar, the simulator assumes the stop hit first. If multiple TPs
 # are touched without a stop hit, partial targets fill sequentially. Learning state resets on reload.
 # Swing-reversal candidates approximate local OHLCV/RSI turns; manual chart drawings are not inputs.
-# Proxy arrows are drawn once on the next candle after a closed-bar candidate; they are not order fills.
+# Proxy arrows are queued from closed-bar candidates and re-rendered live; they are not order fills.
 # Equity is optional: without it, trades use one simulated unit and percent risk/drawdown caps
 # cannot be calculated. No live orders are placed. Costs are estimates; actual execution differs.
 @indicator('Fighter-Jet Radar - Paper Trade Simulator', overlay_main_pane=True)
@@ -170,6 +170,10 @@ class Main(MainContext):
         self._macd_signal_ema = nan
         self._swing_proxy_cache_bar = -1
         self._swing_proxy_last_drawn_bar = -1
+        self._swing_proxy_arrow_history: list[list[float]] = [
+            [0.0, 0.0, 0.0, 0.0, 0.0, 0.0],
+        ]
+        self._swing_proxy_arrow_history.pop(0)
         self._swing_proxy_cache_side = 0
         self._swing_proxy_cache_time = nan
         self._swing_proxy_cache_price = nan
@@ -533,6 +537,16 @@ class Main(MainContext):
                 color=arrow_color, line_width=3,
             )
         )
+
+    def _redraw_swing_proxy_arrow_history(self) -> None:
+        for arrow in self._swing_proxy_arrow_history:
+            arrow_gated = False
+            if arrow[5] > 0.0:
+                arrow_gated = True
+            self._draw_swing_proxy_arrow(
+                arrow[0], arrow[1], arrow[2], arrow[3],
+                int(arrow[4]), arrow_gated,
+            )
 
     def _update_live_tick_counts(self, current_price: float) -> None:
         # BUY/SELL labels proxy up/down price moves; OHLCV has no aggressor-side data.
@@ -2085,21 +2099,26 @@ class Main(MainContext):
         )
         self._update_drawdown_state(account_equity_quote, max_drawdown_pct)
         new_sim_bar = self.bar_index != self._sim_bar_index
-        # Flush each cached, closed-bar proxy once as the next candle arrives.
-        # Do not depend on consecutive bar indices: feeds can skip an index at gaps.
+        # Queue each closed-bar candidate once when the next candle arrives.
+        # Re-render the bounded queue on the live bar so drawings survive recalculation.
         if (new_sim_bar and self._swing_proxy_cache_side != 0
                 and self._swing_proxy_cache_bar != self._swing_proxy_last_drawn_bar):
             arrow_delta = nan
             if len(self.time) >= 2:
                 arrow_delta = abs(self.time[0] - self.time[1])
-            self._draw_swing_proxy_arrow(
+            arrow_gated_value = 0.0
+            if self._swing_proxy_cache_gated:
+                arrow_gated_value = 1.0
+            self._swing_proxy_arrow_history.append([
                 self._swing_proxy_cache_time, arrow_delta,
-                self._swing_proxy_cache_price,
-                self._swing_proxy_cache_atr,
-                self._swing_proxy_cache_side,
-                self._swing_proxy_cache_gated,
-            )
+                self._swing_proxy_cache_price, self._swing_proxy_cache_atr,
+                self._swing_proxy_cache_side * 1.0, arrow_gated_value,
+            ])
+            if len(self._swing_proxy_arrow_history) > 100:
+                self._swing_proxy_arrow_history.pop(0)
             self._swing_proxy_last_drawn_bar = self._swing_proxy_cache_bar
+        if self.is_last_bar:
+            self._redraw_swing_proxy_arrow_history()
         if (self._mtf_trend_length != trend_length
                 or self._mtf_radar_length != radar_length
                 or self._mtf_volume_sma != volume_sma
