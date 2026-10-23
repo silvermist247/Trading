@@ -539,14 +539,22 @@ class Main(MainContext):
         )
 
     def _redraw_swing_proxy_arrow_history(self) -> None:
+        # Each arrow is three segments; 12 arrows + 12 HUD labels + up to two
+        # SIM exit segments caps this calc at 50 drawing changes.
+        first_arrow_index = len(self._swing_proxy_arrow_history) - 12
+        if first_arrow_index < 0:
+            first_arrow_index = 0
+        arrow_index = 0
         for arrow in self._swing_proxy_arrow_history:
-            arrow_gated = False
-            if arrow[5] > 0.0:
-                arrow_gated = True
-            self._draw_swing_proxy_arrow(
-                arrow[0], arrow[1], arrow[2], arrow[3],
-                int(arrow[4]), arrow_gated,
-            )
+            if arrow_index >= first_arrow_index:
+                arrow_gated = False
+                if arrow[5] > 0.0:
+                    arrow_gated = True
+                self._draw_swing_proxy_arrow(
+                    arrow[0], arrow[1], arrow[2], arrow[3],
+                    int(arrow[4]), arrow_gated,
+                )
+            arrow_index = arrow_index + 1
 
     def _update_live_tick_counts(self, current_price: float) -> None:
         # BUY/SELL labels proxy up/down price moves; OHLCV has no aggressor-side data.
@@ -2114,7 +2122,7 @@ class Main(MainContext):
                 self._swing_proxy_cache_price, self._swing_proxy_cache_atr,
                 self._swing_proxy_cache_side * 1.0, arrow_gated_value,
             ])
-            if len(self._swing_proxy_arrow_history) > 100:
+            if len(self._swing_proxy_arrow_history) > 50:
                 self._swing_proxy_arrow_history.pop(0)
             self._swing_proxy_last_drawn_bar = self._swing_proxy_cache_bar
         if self.is_last_bar:
