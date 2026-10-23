@@ -31,7 +31,7 @@ from indie.drawings import (
 # any target are touched in one bar, the simulator assumes the stop hit first. If multiple TPs
 # are touched without a stop hit, partial targets fill sequentially. Learning state resets on reload.
 # Swing-reversal candidates approximate local OHLCV/RSI turns; manual chart drawings are not inputs.
-# Chart arrows are annotations: green/red pass setup gates (next-open recheck pending); amber means blocked.
+# Proxy arrows are drawn once on the next candle after a closed-bar candidate; they are not order fills.
 # Equity is optional: without it, trades use one simulated unit and percent risk/drawdown caps
 # cannot be calculated. No live orders are placed. Costs are estimates; actual execution differs.
 @indicator('Fighter-Jet Radar - Paper Trade Simulator', overlay_main_pane=True)
@@ -169,6 +169,7 @@ class Main(MainContext):
         self._macd_slow_ema = nan
         self._macd_signal_ema = nan
         self._swing_proxy_cache_bar = -1
+        self._swing_proxy_last_drawn_bar = -1
         self._swing_proxy_cache_side = 0
         self._swing_proxy_cache_time = nan
         self._swing_proxy_cache_price = nan
@@ -2084,8 +2085,10 @@ class Main(MainContext):
         )
         self._update_drawdown_state(account_equity_quote, max_drawdown_pct)
         new_sim_bar = self.bar_index != self._sim_bar_index
+        # Flush each cached, closed-bar proxy once as the next candle arrives.
+        # Do not depend on consecutive bar indices: feeds can skip an index at gaps.
         if (new_sim_bar and self._swing_proxy_cache_side != 0
-                and self._swing_proxy_cache_bar == self.bar_index - 1):
+                and self._swing_proxy_cache_bar != self._swing_proxy_last_drawn_bar):
             arrow_delta = nan
             if len(self.time) >= 2:
                 arrow_delta = abs(self.time[0] - self.time[1])
@@ -2096,6 +2099,7 @@ class Main(MainContext):
                 self._swing_proxy_cache_side,
                 self._swing_proxy_cache_gated,
             )
+            self._swing_proxy_last_drawn_bar = self._swing_proxy_cache_bar
         if (self._mtf_trend_length != trend_length
                 or self._mtf_radar_length != radar_length
                 or self._mtf_volume_sma != volume_sma
