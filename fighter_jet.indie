@@ -32,6 +32,7 @@ from indie.drawings import (
 # are touched without a stop hit, partial targets fill sequentially. Learning state resets on reload.
 # Swing-reversal candidates approximate local OHLCV/RSI turns; manual chart drawings are not inputs.
 # Proxy arrows are queued from closed-bar candidates and re-rendered live; they are not order fills.
+# Top-left trend warnings and the directional vote are advisory, not win probabilities or entry gates.
 # Equity is optional: without it, trades use one simulated unit and percent risk/drawdown caps
 # cannot be calculated. No live orders are placed. Costs are estimates; actual execution differs.
 @indicator('Fighter-Jet Radar - Paper Trade Simulator', overlay_main_pane=True)
@@ -4511,8 +4512,59 @@ class Main(MainContext):
             else:
                 progress_bar_text = progress_bar_text + '-'
         progress_bar_text = progress_bar_text + ']'
+
+        trend_warning_text = 'NO HEAVY TREND WARNING'
+        if (market_trending and not ema_up and confluence <= -3):
+            if mtf_short_ok:
+                trend_warning_text = 'HEAVY DOWNTREND: DO NOT BUY'
+            elif partial_mtf_short_ok:
+                trend_warning_text = 'DOWNTREND (5M): AVOID BUYS'
+            elif mtf_long_ok or partial_mtf_long_ok:
+                trend_warning_text = 'TREND CONFLICT: WAIT'
+            else:
+                trend_warning_text = 'LOCAL DOWNTREND: AVOID BUYS'
+        elif market_trending and ema_up and confluence >= 3:
+            if mtf_long_ok:
+                trend_warning_text = 'HEAVY UPTREND: DO NOT SELL'
+            elif partial_mtf_long_ok:
+                trend_warning_text = 'UPTREND (5M): AVOID SELLS'
+            elif mtf_short_ok or partial_mtf_short_ok:
+                trend_warning_text = 'TREND CONFLICT: WAIT'
+            else:
+                trend_warning_text = 'LOCAL UPTREND: AVOID SELLS'
+
+        direction_vote_side = 'MIXED / WAIT'
+        if sfx_consensus >= sfx_threshold:
+            direction_vote_side = 'BUY'
+        elif sfx_consensus <= -sfx_threshold:
+            direction_vote_side = 'SELL'
+        elif sfx_consensus > 0.15:
+            direction_vote_side = 'LEAN BUY'
+        elif sfx_consensus < -0.15:
+            direction_vote_side = 'LEAN SELL'
+        direction_vote_fill = int(abs(sfx_consensus) * 10.0)
+        if direction_vote_fill > 10:
+            direction_vote_fill = 10
+        direction_vote_bar = '['
+        for vote_bar_index in range(10):
+            if vote_bar_index < direction_vote_fill:
+                direction_vote_bar = direction_vote_bar + '#'
+            else:
+                direction_vote_bar = direction_vote_bar + '-'
+        direction_vote_bar = direction_vote_bar + ']'
+        direction_vote_score_text = str(round(sfx_consensus, 2))
+        if sfx_consensus > 0.0:
+            direction_vote_score_text = '+' + direction_vote_score_text
+        direction_vote_text = (
+            'DIRECTION VOTE: ' + direction_vote_side + ' '
+            + direction_vote_bar + ' ' + direction_vote_score_text
+            + ' | NOT ODDS'
+        )
+
         progress_display_text = (
-            'BUY/SELL GATE READINESS | NOT WIN ODDS\n'
+            trend_warning_text + '\n'
+            + direction_vote_text + '\n'
+            + 'BUY/SELL GATE READINESS | NOT WIN ODDS\n'
             + 'BUY  ' + buy_bar_text + ' ' + str(buy_readiness_pct) + '%\n'
             + 'SELL ' + sell_bar_text + ' ' + str(sell_readiness_pct) + '%\n'
             + 'NEXT ' + progress_bar_text + ' '
