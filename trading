@@ -428,6 +428,18 @@ class Main(MainContext):
             text_color=color.rgba(255, 255, 255, 1.0),
             font_size=11,
         )
+        self._trend_warning_label = LabelRel(
+            '',
+            RelativePosition(
+                vertical_anchor=va.TOP,
+                horizontal_anchor=ha.LEFT,
+                top_bottom_ratio=0.02,
+                left_right_ratio=0.02,
+            ),
+            bg_color=color.rgba(12, 20, 31, 0.96),
+            text_color=color.rgba(255, 255, 255, 1.0),
+            font_size=11,
+        )
         self._tick_buy_caption_label = LabelRel(
             '',
             RelativePosition(
@@ -540,9 +552,9 @@ class Main(MainContext):
         )
 
     def _redraw_swing_proxy_arrow_history(self) -> None:
-        # Each arrow is three segments; 12 arrows + 12 HUD labels + up to two
-        # SIM exit segments caps this calc at 50 drawing changes.
-        first_arrow_index = len(self._swing_proxy_arrow_history) - 12
+        # Each arrow is three segments; 11 arrows + 13 HUD labels + up to two
+        # SIM exit segments cap this calc at 48 drawing changes.
+        first_arrow_index = len(self._swing_proxy_arrow_history) - 11
         if first_arrow_index < 0:
             first_arrow_index = 0
         arrow_index = 0
@@ -4514,24 +4526,31 @@ class Main(MainContext):
         progress_bar_text = progress_bar_text + ']'
 
         trend_warning_text = 'NO HEAVY TREND WARNING'
+        trend_warning_color = color.rgba(255, 255, 255, 1.0)
         if (market_trending and not ema_up and confluence <= -3):
             if mtf_short_ok:
                 trend_warning_text = 'HEAVY DOWNTREND: DO NOT BUY'
+                trend_warning_color = color.rgba(255, 0, 0, 1.0)
             elif partial_mtf_short_ok:
                 trend_warning_text = 'DOWNTREND (5M): AVOID BUYS'
+                trend_warning_color = color.rgba(255, 0, 0, 1.0)
             elif mtf_long_ok or partial_mtf_long_ok:
                 trend_warning_text = 'TREND CONFLICT: WAIT'
             else:
                 trend_warning_text = 'LOCAL DOWNTREND: AVOID BUYS'
+                trend_warning_color = color.rgba(255, 0, 0, 1.0)
         elif market_trending and ema_up and confluence >= 3:
             if mtf_long_ok:
                 trend_warning_text = 'HEAVY UPTREND: DO NOT SELL'
+                trend_warning_color = color.rgba(0, 255, 0, 1.0)
             elif partial_mtf_long_ok:
                 trend_warning_text = 'UPTREND (5M): AVOID SELLS'
+                trend_warning_color = color.rgba(0, 255, 0, 1.0)
             elif mtf_short_ok or partial_mtf_short_ok:
                 trend_warning_text = 'TREND CONFLICT: WAIT'
             else:
                 trend_warning_text = 'LOCAL UPTREND: AVOID SELLS'
+                trend_warning_color = color.rgba(0, 255, 0, 1.0)
 
         direction_vote_side = 'MIXED / WAIT'
         if sfx_consensus >= sfx_threshold:
@@ -4562,8 +4581,7 @@ class Main(MainContext):
         )
 
         progress_display_text = (
-            trend_warning_text + '\n'
-            + direction_vote_text + '\n'
+            direction_vote_text + '\n'
             + 'BUY/SELL GATE READINESS | NOT WIN ODDS\n'
             + 'BUY  ' + buy_bar_text + ' ' + str(buy_readiness_pct) + '%\n'
             + 'SELL ' + sell_bar_text + ' ' + str(sell_readiness_pct) + '%\n'
@@ -4573,6 +4591,8 @@ class Main(MainContext):
         )
         self._progress_label.text = progress_display_text
         self._progress_label.text_color = color.rgba(255, 255, 255, 1.0)
+        self._trend_warning_label.text = trend_warning_text
+        self._trend_warning_label.text_color = trend_warning_color
 
         chat_display_text = (
             'SIM RULES | ' + chart_chat_question + '\n'
@@ -4612,6 +4632,7 @@ class Main(MainContext):
         self.chart.draw(self._analyst_label)
         self.chart.draw(self._chat_label)
         self.chart.draw(self._progress_label)
+        self.chart.draw(self._trend_warning_label)
         self.chart.draw(self._tick_buy_caption_label)
         self.chart.draw(self._tick_buy_count_label)
         self.chart.draw(self._tick_sell_caption_label)
