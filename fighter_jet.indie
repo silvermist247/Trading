@@ -429,6 +429,30 @@ class Main(MainContext):
             text_color=color.rgba(255, 255, 255, 1.0),
             font_size=11,
         )
+        self._pressure_buy_label = LabelRel(
+            '',
+            RelativePosition(
+                vertical_anchor=va.TOP,
+                horizontal_anchor=ha.LEFT,
+                top_bottom_ratio=0.08,
+                left_right_ratio=0.02,
+            ),
+            bg_color=color.rgba(12, 20, 31, 0.0),
+            text_color=color.rgba(255, 255, 255, 1.0),
+            font_size=11,
+        )
+        self._pressure_sell_label = LabelRel(
+            '',
+            RelativePosition(
+                vertical_anchor=va.TOP,
+                horizontal_anchor=ha.LEFT,
+                top_bottom_ratio=0.08,
+                left_right_ratio=0.02,
+            ),
+            bg_color=color.rgba(12, 20, 31, 0.0),
+            text_color=color.rgba(255, 255, 255, 1.0),
+            font_size=11,
+        )
         self._trend_warning_label = LabelRel(
             '',
             RelativePosition(
@@ -484,30 +508,6 @@ class Main(MainContext):
                 horizontal_anchor=ha.LEFT,
                 top_bottom_ratio=0.89,
                 left_right_ratio=0.79,
-            ),
-            bg_color=color.rgba(16, 28, 38, 0.92),
-            text_color=color.rgba(255, 255, 255, 1.0),
-            font_size=12,
-        )
-        self._tick_net_caption_label = LabelRel(
-            '',
-            RelativePosition(
-                vertical_anchor=va.BOTTOM,
-                horizontal_anchor=ha.LEFT,
-                top_bottom_ratio=0.89,
-                left_right_ratio=0.82,
-            ),
-            bg_color=color.rgba(16, 28, 38, 0.92),
-            text_color=color.rgba(255, 255, 255, 1.0),
-            font_size=12,
-        )
-        self._tick_net_value_label = LabelRel(
-            '',
-            RelativePosition(
-                vertical_anchor=va.BOTTOM,
-                horizontal_anchor=ha.LEFT,
-                top_bottom_ratio=0.89,
-                left_right_ratio=0.88,
             ),
             bg_color=color.rgba(16, 28, 38, 0.92),
             text_color=color.rgba(255, 255, 255, 1.0),
@@ -3810,7 +3810,6 @@ class Main(MainContext):
         tick_sell_count_text = str(self._tick_down_count)
         tick_buy_caption = 'TICKS/BAR | BUY '
         tick_sell_caption = ' | SELL '
-        tick_net_caption = ' | NET '
         tick_history_count = len(self._tick_up_history)
         tick_sample_count = tick_history_count + 1
         if tick_sample_count > 20:
@@ -3836,6 +3835,7 @@ class Main(MainContext):
             'AVG20 ' + str(tick_sample_count) + '/20 | BUY '
             + str(round(average_buy_ticks, 1))
             + ' SELL ' + str(round(average_sell_ticks, 1))
+            + ' | NET NOW ' + tick_net_text
         )
 
         pressure_lookback = 20
@@ -3843,6 +3843,8 @@ class Main(MainContext):
             pressure_lookback = len(self.close)
         proxy_buy_volume = 0.0
         proxy_sell_volume = 0.0
+        average_buy_fraction_sum = 0.0
+        average_pressure_samples = 0
         pressure_bar_index = 0
         for pressure_bar_index in range(pressure_lookback):
             pressure_high = self.high[pressure_bar_index]
@@ -3851,10 +3853,9 @@ class Main(MainContext):
             pressure_close = self.close[pressure_bar_index]
             pressure_volume = self.volume[pressure_bar_index]
             pressure_range = pressure_high - pressure_low
-            if (pressure_range > 0.0 and pressure_volume > 0.0
-                    and not isnan(pressure_high) and not isnan(pressure_low)
-                    and not isnan(pressure_open) and not isnan(pressure_close)
-                    and not isnan(pressure_volume)):
+            if (pressure_range > 0.0 and not isnan(pressure_high)
+                    and not isnan(pressure_low) and not isnan(pressure_open)
+                    and not isnan(pressure_close)):
                 body_pressure = (pressure_close - pressure_open) / pressure_range
                 close_location_pressure = (
                     2.0 * pressure_close - pressure_high - pressure_low
@@ -3865,12 +3866,17 @@ class Main(MainContext):
                 )
                 buy_fraction = (1.0 + candle_pressure_proxy) * 0.5
                 sell_fraction = 1.0 - buy_fraction
-                proxy_buy_volume = (
-                    proxy_buy_volume + pressure_volume * buy_fraction
+                average_buy_fraction_sum = (
+                    average_buy_fraction_sum + buy_fraction
                 )
-                proxy_sell_volume = (
-                    proxy_sell_volume + pressure_volume * sell_fraction
-                )
+                average_pressure_samples = average_pressure_samples + 1
+                if not isnan(pressure_volume) and pressure_volume > 0.0:
+                    proxy_buy_volume = (
+                        proxy_buy_volume + pressure_volume * buy_fraction
+                    )
+                    proxy_sell_volume = (
+                        proxy_sell_volume + pressure_volume * sell_fraction
+                    )
 
         proxy_volume_total = proxy_buy_volume + proxy_sell_volume
         volume_pressure_score = 0.0
@@ -3905,6 +3911,25 @@ class Main(MainContext):
         if buyer_pressure_pct > 100:
             buyer_pressure_pct = 100
         seller_pressure_pct = 100 - buyer_pressure_pct
+        average_buy_pressure_pct = 50
+        average_pressure_count_text = 'AVG--'
+        average_buy_pressure_text = '--'
+        average_sell_pressure_text = '--'
+        if average_pressure_samples > 0:
+            average_buy_pressure_pct = int(round(
+                average_buy_fraction_sum * 100.0
+                / (average_pressure_samples * 1.0)
+            ))
+            if average_buy_pressure_pct < 0:
+                average_buy_pressure_pct = 0
+            if average_buy_pressure_pct > 100:
+                average_buy_pressure_pct = 100
+            average_sell_pressure_pct = 100 - average_buy_pressure_pct
+            average_pressure_count_text = (
+                'AVG' + str(average_pressure_samples) + '-OHLC'
+            )
+            average_buy_pressure_text = str(average_buy_pressure_pct) + '%'
+            average_sell_pressure_text = str(average_sell_pressure_pct) + '%'
         buyer_pressure_fill = int(buyer_pressure_pct / 10.0)
         seller_pressure_fill = int(seller_pressure_pct / 10.0)
         if buyer_pressure_fill > 10:
@@ -4669,12 +4694,20 @@ class Main(MainContext):
             + ' | NOT ODDS'
         )
 
+        buyer_pressure_line = (
+            'BUY ' + buyer_pressure_bar + ' ' + str(buyer_pressure_pct)
+            + '% | ' + average_pressure_count_text + ' '
+            + average_buy_pressure_text
+        )
+        seller_pressure_line = (
+            'SELL ' + seller_pressure_bar + ' ' + str(seller_pressure_pct)
+            + '% | ' + average_pressure_count_text + ' '
+            + average_sell_pressure_text
+        )
         progress_display_text = (
             direction_vote_text + '\n'
-            + 'PRESSURE SHARE: LAST20 OHLCV/TICK PROXY | NOT FLOW/ODDS\n'
-            + 'BUY ' + buyer_pressure_bar + ' ' + str(buyer_pressure_pct)
-            + '% | SELL ' + seller_pressure_bar + ' '
-            + str(seller_pressure_pct) + '%\n'
+            + 'PRESSURE: LAST20 OHLCV/TICK PROXY | NOT FLOW/ODDS\n'
+            + '\n\n'
             + 'BUY/SELL GATE READINESS | NOT WIN ODDS\n'
             + 'BUY  ' + buy_bar_text + ' ' + str(buy_readiness_pct) + '%\n'
             + 'SELL ' + sell_bar_text + ' ' + str(sell_readiness_pct) + '%\n'
@@ -4684,6 +4717,17 @@ class Main(MainContext):
         )
         self._progress_label.text = progress_display_text
         self._progress_label.text_color = color.rgba(255, 255, 255, 1.0)
+        self._pressure_buy_label.text = '\n\n' + buyer_pressure_line
+        self._pressure_sell_label.text = '\n\n\n' + seller_pressure_line
+        pressure_buy_color = color.rgba(255, 255, 255, 1.0)
+        pressure_sell_color = color.rgba(255, 255, 255, 1.0)
+        if self.is_last_bar:
+            if self._tick_flash_side > 0:
+                pressure_buy_color = color.rgba(0, 255, 0, 1.0)
+            elif self._tick_flash_side < 0:
+                pressure_sell_color = color.rgba(255, 0, 0, 1.0)
+        self._pressure_buy_label.text_color = pressure_buy_color
+        self._pressure_sell_label.text_color = pressure_sell_color
         self._trend_warning_label.text = trend_warning_text
         self._trend_warning_label.text_color = trend_warning_color
 
@@ -4703,13 +4747,11 @@ class Main(MainContext):
         self._chat_label.text = chat_display_text
         self._chat_label.text_color = color.rgba(255, 255, 255, 1.0)
 
-        # Tick counts keep their existing number-only green/red flashes.
+        # BUY/SELL count flashes remain number-only; NET is shown on AVG20.
         self._tick_buy_caption_label.text = tick_buy_caption
         self._tick_buy_count_label.text = tick_buy_count_text
         self._tick_sell_caption_label.text = tick_sell_caption
         self._tick_sell_count_label.text = tick_sell_count_text
-        self._tick_net_caption_label.text = tick_net_caption
-        self._tick_net_value_label.text = tick_net_text
         buy_count_color = color.rgba(255, 255, 255, 1.0)
         sell_count_color = color.rgba(255, 255, 255, 1.0)
         if self._tick_flash_side > 0:
@@ -4718,20 +4760,19 @@ class Main(MainContext):
             sell_count_color = color.rgba(255, 0, 0, 1.0)
         self._tick_buy_count_label.text_color = buy_count_color
         self._tick_sell_count_label.text_color = sell_count_color
-        self._tick_net_value_label.text_color = color.rgba(255, 255, 255, 1.0)
         self.chart.draw(self._status_label)
         self.chart.draw(self._support_label)
         self.chart.draw(self._resistance_label)
         self.chart.draw(self._analyst_label)
         self.chart.draw(self._chat_label)
         self.chart.draw(self._progress_label)
+        self.chart.draw(self._pressure_buy_label)
+        self.chart.draw(self._pressure_sell_label)
         self.chart.draw(self._trend_warning_label)
         self.chart.draw(self._tick_buy_caption_label)
         self.chart.draw(self._tick_buy_count_label)
         self.chart.draw(self._tick_sell_caption_label)
         self.chart.draw(self._tick_sell_count_label)
-        self.chart.draw(self._tick_net_caption_label)
-        self.chart.draw(self._tick_net_value_label)
 
         ema_up_plot = nan
         ema_down_plot = nan
