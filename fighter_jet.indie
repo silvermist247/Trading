@@ -33,6 +33,7 @@ from indie.drawings import (
 # Swing-reversal candidates approximate local OHLCV/RSI turns; manual chart drawings are not inputs.
 # Proxy arrows are queued from closed-bar candidates and re-rendered live; they are not order fills.
 # Top-left trend warnings and the directional vote are advisory, not win probabilities or entry gates.
+# Buyer/seller pressure is an OHLCV/up-down-tick proxy, not aggressor-side order flow.
 # Equity is optional: without it, trades use one simulated unit and percent risk/drawdown caps
 # cannot be calculated. No live orders are placed. Costs are estimates; actual execution differs.
 @indicator('Fighter-Jet Radar - Paper Trade Simulator', overlay_main_pane=True)
@@ -3837,6 +3838,94 @@ class Main(MainContext):
             + ' SELL ' + str(round(average_sell_ticks, 1))
         )
 
+        pressure_lookback = 20
+        if len(self.close) < pressure_lookback:
+            pressure_lookback = len(self.close)
+        proxy_buy_volume = 0.0
+        proxy_sell_volume = 0.0
+        pressure_bar_index = 0
+        for pressure_bar_index in range(pressure_lookback):
+            pressure_high = self.high[pressure_bar_index]
+            pressure_low = self.low[pressure_bar_index]
+            pressure_open = self.open[pressure_bar_index]
+            pressure_close = self.close[pressure_bar_index]
+            pressure_volume = self.volume[pressure_bar_index]
+            pressure_range = pressure_high - pressure_low
+            if (pressure_range > 0.0 and pressure_volume > 0.0
+                    and not isnan(pressure_high) and not isnan(pressure_low)
+                    and not isnan(pressure_open) and not isnan(pressure_close)
+                    and not isnan(pressure_volume)):
+                body_pressure = (pressure_close - pressure_open) / pressure_range
+                close_location_pressure = (
+                    2.0 * pressure_close - pressure_high - pressure_low
+                ) / pressure_range
+                candle_pressure_proxy = self._clip_value(
+                    (body_pressure + close_location_pressure) * 0.5,
+                    -1.0, 1.0,
+                )
+                buy_fraction = (1.0 + candle_pressure_proxy) * 0.5
+                sell_fraction = 1.0 - buy_fraction
+                proxy_buy_volume = (
+                    proxy_buy_volume + pressure_volume * buy_fraction
+                )
+                proxy_sell_volume = (
+                    proxy_sell_volume + pressure_volume * sell_fraction
+                )
+
+        proxy_volume_total = proxy_buy_volume + proxy_sell_volume
+        volume_pressure_score = 0.0
+        if proxy_volume_total > 0.0:
+            volume_pressure_score = (
+                proxy_buy_volume - proxy_sell_volume
+            ) / proxy_volume_total
+        tick_event_total = tick_up_total + tick_down_total
+        tick_pressure_score = 0.0
+        if tick_event_total > 0:
+            tick_pressure_score = (
+                (tick_up_total - tick_down_total) / (tick_event_total * 1.0)
+            )
+        pressure_weighted_sum = 0.0
+        pressure_weight_total = 0.0
+        if proxy_volume_total > 0.0:
+            pressure_weighted_sum = pressure_weighted_sum + volume_pressure_score * 0.75
+            pressure_weight_total = pressure_weight_total + 0.75
+        if tick_event_total > 0:
+            pressure_weighted_sum = pressure_weighted_sum + tick_pressure_score * 0.25
+            pressure_weight_total = pressure_weight_total + 0.25
+        buyer_seller_pressure_score = 0.0
+        if pressure_weight_total > 0.0:
+            buyer_seller_pressure_score = (
+                pressure_weighted_sum / pressure_weight_total
+            )
+        buyer_pressure_pct = int(round(
+            (buyer_seller_pressure_score + 1.0) * 50.0
+        ))
+        if buyer_pressure_pct < 0:
+            buyer_pressure_pct = 0
+        if buyer_pressure_pct > 100:
+            buyer_pressure_pct = 100
+        seller_pressure_pct = 100 - buyer_pressure_pct
+        buyer_pressure_fill = int(buyer_pressure_pct / 10.0)
+        seller_pressure_fill = int(seller_pressure_pct / 10.0)
+        if buyer_pressure_fill > 10:
+            buyer_pressure_fill = 10
+        if seller_pressure_fill > 10:
+            seller_pressure_fill = 10
+        buyer_pressure_bar = '['
+        seller_pressure_bar = '['
+        pressure_bar_index = 0
+        for pressure_bar_index in range(10):
+            if pressure_bar_index < buyer_pressure_fill:
+                buyer_pressure_bar = buyer_pressure_bar + '#'
+            else:
+                buyer_pressure_bar = buyer_pressure_bar + '-'
+            if pressure_bar_index < seller_pressure_fill:
+                seller_pressure_bar = seller_pressure_bar + '#'
+            else:
+                seller_pressure_bar = seller_pressure_bar + '-'
+        buyer_pressure_bar = buyer_pressure_bar + ']'
+        seller_pressure_bar = seller_pressure_bar + ']'
+
         why_text = (
             trend_reason + ' ' + bb_reason + ' ' + rsi_reason + ' '
             + volume_reason + ' ' + candle_reason + ' ' + macd_reason
@@ -4582,6 +4671,10 @@ class Main(MainContext):
 
         progress_display_text = (
             direction_vote_text + '\n'
+            + 'PRESSURE SHARE: LAST20 OHLCV/TICK PROXY | NOT FLOW/ODDS\n'
+            + 'BUY ' + buyer_pressure_bar + ' ' + str(buyer_pressure_pct)
+            + '% | SELL ' + seller_pressure_bar + ' '
+            + str(seller_pressure_pct) + '%\n'
             + 'BUY/SELL GATE READINESS | NOT WIN ODDS\n'
             + 'BUY  ' + buy_bar_text + ' ' + str(buy_readiness_pct) + '%\n'
             + 'SELL ' + sell_bar_text + ' ' + str(sell_readiness_pct) + '%\n'
