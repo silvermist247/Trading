@@ -160,6 +160,15 @@ class Main(MainContext):
         self._tick_down_history = [0]
         self._tick_up_history.pop(0)
         self._tick_down_history.pop(0)
+        # HUD-only history; update the current bar in place for a 20-bar mean.
+        self._readiness_history_bar_index = -1
+        self._buy_readiness_history: list[float] = [0.0]
+        self._sell_readiness_history: list[float] = [0.0]
+        self._buy_readiness_history.pop(0)
+        self._sell_readiness_history.pop(0)
+        self._entry_progress_cache_valid = False
+        self._entry_progress_last_pct = 0
+        self._entry_progress_last_data = ''
         self._sim_bar_index = -1
         self._macd_fast_count = 0
         self._macd_slow_count = 0
@@ -453,6 +462,18 @@ class Main(MainContext):
             text_color=color.rgba(255, 255, 255, 1.0),
             font_size=11,
         )
+        self._next_progress_label = LabelRel(
+            '',
+            RelativePosition(
+                vertical_anchor=va.TOP,
+                horizontal_anchor=ha.LEFT,
+                top_bottom_ratio=0.08,
+                left_right_ratio=0.02,
+            ),
+            bg_color=color.rgba(12, 20, 31, 0.0),
+            text_color=color.rgba(255, 255, 255, 1.0),
+            font_size=11,
+        )
         self._trend_warning_label = LabelRel(
             '',
             RelativePosition(
@@ -553,8 +574,8 @@ class Main(MainContext):
         )
 
     def _redraw_swing_proxy_arrow_history(self) -> None:
-        # Each arrow is three segments; 11 arrows + 13 HUD labels + up to two
-        # SIM exit segments cap this calc at 48 drawing changes.
+        # Each arrow is three segments; 11 arrows + 14 HUD labels + up to two
+        # SIM exit segments cap this calc at 49 drawing changes.
         first_arrow_index = len(self._swing_proxy_arrow_history) - 11
         if first_arrow_index < 0:
             first_arrow_index = 0
@@ -4509,6 +4530,16 @@ class Main(MainContext):
                 entry_progress_pct = 90
             entry_progress_detail = chat_action_text
 
+        next_progress_changed = False
+        if self.is_last_bar:
+            if self._entry_progress_cache_valid:
+                if (entry_progress_pct != self._entry_progress_last_pct
+                        or entry_progress_data != self._entry_progress_last_data):
+                    next_progress_changed = True
+            self._entry_progress_last_pct = entry_progress_pct
+            self._entry_progress_last_data = entry_progress_data
+            self._entry_progress_cache_valid = True
+
         setup_data_pct = 0
         if mtf_ready or (opportunity_entries and mtf_5m_partial_ready):
             setup_data_pct = 25
@@ -4608,6 +4639,54 @@ class Main(MainContext):
             buy_readiness_pct = 100
         if sell_readiness_pct > 100:
             sell_readiness_pct = 100
+
+        if self._readiness_history_bar_index != self.bar_index:
+            if (self._readiness_history_bar_index >= 0
+                    and self.bar_index != self._readiness_history_bar_index + 1):
+                self._buy_readiness_history = [0.0]
+                self._sell_readiness_history = [0.0]
+                self._buy_readiness_history.pop(0)
+                self._sell_readiness_history.pop(0)
+            self._readiness_history_bar_index = self.bar_index
+            self._buy_readiness_history.append(buy_readiness_pct * 1.0)
+            self._sell_readiness_history.append(sell_readiness_pct * 1.0)
+            if len(self._buy_readiness_history) > 20:
+                self._buy_readiness_history.pop(0)
+            if len(self._sell_readiness_history) > 20:
+                self._sell_readiness_history.pop(0)
+        else:
+            readiness_last_index = len(self._buy_readiness_history) - 1
+            if readiness_last_index >= 0:
+                self._buy_readiness_history[readiness_last_index] = (
+                    buy_readiness_pct * 1.0
+                )
+                self._sell_readiness_history[readiness_last_index] = (
+                    sell_readiness_pct * 1.0
+                )
+
+        readiness_average_samples = len(self._buy_readiness_history)
+        buy_readiness_total = 0.0
+        sell_readiness_total = 0.0
+        for readiness_history_index in range(readiness_average_samples):
+            buy_readiness_total = (
+                buy_readiness_total
+                + self._buy_readiness_history[readiness_history_index]
+            )
+            sell_readiness_total = (
+                sell_readiness_total
+                + self._sell_readiness_history[readiness_history_index]
+            )
+        average_buy_readiness_pct = 0
+        average_sell_readiness_pct = 0
+        if readiness_average_samples > 0:
+            average_buy_readiness_pct = int(round(
+                buy_readiness_total / (readiness_average_samples * 1.0)
+            ))
+            average_sell_readiness_pct = int(round(
+                sell_readiness_total / (readiness_average_samples * 1.0)
+            ))
+        readiness_average_text = 'AVG' + str(readiness_average_samples)
+
         buy_fill_count = int(buy_readiness_pct / 10)
         sell_fill_count = int(sell_readiness_pct / 10)
         if buy_fill_count > 10:
@@ -4704,21 +4783,45 @@ class Main(MainContext):
             + '% | ' + average_pressure_count_text + ' '
             + average_sell_pressure_text
         )
+        buyer_readiness_line = (
+            'BUY  ' + buy_bar_text + ' ' + str(buy_readiness_pct)
+            + '% | ' + readiness_average_text + ' '
+            + str(average_buy_readiness_pct) + '%'
+        )
+        seller_readiness_line = (
+            'SELL ' + sell_bar_text + ' ' + str(sell_readiness_pct)
+            + '% | ' + readiness_average_text + ' '
+            + str(average_sell_readiness_pct) + '%'
+        )
+        next_progress_line = (
+            'NEXT ' + progress_bar_text + ' '
+            + str(entry_progress_pct) + '% | ' + entry_progress_data
+        )
         progress_display_text = (
             direction_vote_text + '\n'
             + 'PRESSURE: LAST20 OHLCV/TICK PROXY | NOT FLOW/ODDS\n'
             + '\n\n'
             + 'BUY/SELL GATE READINESS | NOT WIN ODDS\n'
-            + 'BUY  ' + buy_bar_text + ' ' + str(buy_readiness_pct) + '%\n'
-            + 'SELL ' + sell_bar_text + ' ' + str(sell_readiness_pct) + '%\n'
-            + 'NEXT ' + progress_bar_text + ' '
-            + str(entry_progress_pct) + '% | ' + entry_progress_data + '\n'
+            + '\n\n\n'
             + entry_progress_detail
         )
         self._progress_label.text = progress_display_text
         self._progress_label.text_color = color.rgba(255, 255, 255, 1.0)
-        self._pressure_buy_label.text = '\n\n' + buyer_pressure_line
-        self._pressure_sell_label.text = '\n\n\n' + seller_pressure_line
+        self._pressure_buy_label.text = (
+            '\n\n' + buyer_pressure_line
+            + '\n\n\n' + buyer_readiness_line
+        )
+        self._pressure_sell_label.text = (
+            '\n\n\n' + seller_pressure_line
+            + '\n\n\n' + seller_readiness_line
+        )
+        self._next_progress_label.text = (
+            '\n\n\n\n\n\n\n' + next_progress_line
+        )
+        next_progress_color = color.rgba(255, 255, 255, 1.0)
+        if self.is_last_bar and next_progress_changed:
+            next_progress_color = color.rgba(0, 180, 255, 1.0)
+        self._next_progress_label.text_color = next_progress_color
         pressure_buy_color = color.rgba(255, 255, 255, 1.0)
         pressure_sell_color = color.rgba(255, 255, 255, 1.0)
         if self.is_last_bar:
@@ -4768,6 +4871,7 @@ class Main(MainContext):
         self.chart.draw(self._progress_label)
         self.chart.draw(self._pressure_buy_label)
         self.chart.draw(self._pressure_sell_label)
+        self.chart.draw(self._next_progress_label)
         self.chart.draw(self._trend_warning_label)
         self.chart.draw(self._tick_buy_caption_label)
         self.chart.draw(self._tick_buy_count_label)
